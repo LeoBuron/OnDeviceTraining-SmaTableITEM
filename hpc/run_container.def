@@ -17,6 +17,28 @@ From: ubuntu:22.04
     uv.lock        /app/uv.lock
 
 %post
+    set -eu
+
+    # Amplitude's login nodes export http_proxy=134.91.129.97://3128 — note
+    # the "://" between host and port instead of ":". apt-get rejects this with
+    # "Unsupported proxy configured: 134.91.129.97://3128". Apptainer 1.x
+    # propagates the proxy env vars into %post by default, so we normalize
+    # them in-place: strip any leading scheme, collapse host://port to
+    # host:port, then re-prepend a single http:// scheme. No-op when no
+    # proxy is set (local Mac builds). POSIX-only — sh is dash on ubuntu:22.04.
+    for var in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do
+        eval "val=\${$var:-}"
+        if [ -z "$val" ]; then continue; fi
+        case "$val" in
+            http://*)  val="${val#http://}"  ;;
+            https://*) val="${val#https://}" ;;
+        esac
+        case "$val" in
+            *://*) val="${val%%://*}:${val#*://}" ;;
+        esac
+        eval "export $var=\"http://$val\""
+    done
+
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl git \
@@ -24,10 +46,17 @@ From: ubuntu:22.04
         python3
     rm -rf /var/lib/apt/lists/*
 
-    curl -LsSf https://astral.sh/uv/install.sh | env \
-        UV_INSTALL_DIR=/usr/local/bin \
-        INSTALLER_NO_MODIFY_PATH=1 \
-        sh
+    # The astral.sh installer is NOT on Amplitude's proxy whitelist (github.com
+    # is). Pull the uv release tarball directly — same pattern as
+    # scripts/amplitude/20_setup.sh, just bound for /usr/local/bin in the image.
+    UV_REL_URL="https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz"
+    tmp="$(mktemp -d)"
+    curl -fsSL "$UV_REL_URL" -o "${tmp}/uv.tar.gz"
+    tar -xzf "${tmp}/uv.tar.gz" -C "${tmp}"
+    cp "${tmp}/uv-x86_64-unknown-linux-gnu/uv"  /usr/local/bin/uv
+    cp "${tmp}/uv-x86_64-unknown-linux-gnu/uvx" /usr/local/bin/uvx
+    chmod +x /usr/local/bin/uv /usr/local/bin/uvx
+    rm -rf "${tmp}"
 
     export UV_PYTHON_INSTALL_DIR=/opt/uv/python
     export UV_CACHE_DIR=/tmp/uv-cache
