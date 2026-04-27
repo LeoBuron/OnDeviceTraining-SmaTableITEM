@@ -5,6 +5,14 @@
 
 set -euo pipefail
 
+# Make user-installed binaries (uv, etc.) available across all amplitude
+# scripts even when the interactive shell hasn't been re-sourced. The export
+# in 20_setup.sh only persists for that subshell — putting it here covers
+# every NN_*.sh that comes after.
+if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 _SCRIPT_NAME="$(basename "${BASH_SOURCE[1]}" .sh)"
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
 LOG_DIR="${LOG_DIR:-${_SCRIPT_DIR}/logs}"
