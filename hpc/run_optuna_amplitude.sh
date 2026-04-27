@@ -50,7 +50,15 @@ FINAL_LOG_DIR="${HPC_HOME}/experiments"
 WS_NAME="smatable-ws"
 WS_DAYS=30
 
-if [ ! -f "${IMAGE}" ];        then echo "missing image: ${IMAGE}"; exit 1; fi
+# Container-mode is opt-in. Default is "no container" — the compute node runs
+# the same uv venv that the login node already populated on Lustre. Container
+# build on amplitude is broken until the proxy whitelist + URL-format issues
+# are sorted; until then this path is the smoke-test workflow.
+USE_CONTAINER="${USE_CONTAINER:-0}"
+
+if [ "${USE_CONTAINER}" = "1" ] && [ ! -f "${IMAGE}" ]; then
+    echo "USE_CONTAINER=1 but missing image: ${IMAGE}"; exit 1
+fi
 if [ ! -f "${HOST_BIN}" ];     then echo "missing HOST binary: ${HOST_BIN} (run hpc/build_all_rqs.sh)"; exit 1; fi
 if [ ! -f "${SEARCH_SPACE}" ]; then echo "missing search space: ${SEARCH_SPACE}"; exit 1; fi
 
@@ -82,25 +90,50 @@ fi
 
 # ---- run ---------------------------------------------------------------
 
-echo "RQ=${RQ} N_WORKERS=${N_WORKERS} TIMEOUT=${TRIAL_TIMEOUT_S}s FOLD_SCHEME=${FOLD_SCHEME}"
-srun --ntasks=1 apptainer run \
-    --writable-tmpfs \
-    --bind "${DATA_CACHE}:/data" \
-    --bind "${LOG_DIR}:/logs" \
-    --bind "${HOST_BIN}:/host_bin:ro" \
-    --bind "${SEARCH_SPACE}:/search_space.json:ro" \
-    --env N_WORKERS="${N_WORKERS}" \
-    --env TRIAL_TIMEOUT_S="${TRIAL_TIMEOUT_S}" \
-    "${IMAGE}" \
-    hpc/run_optuna.py \
-        --rq "${RQ}" \
-        --host-bin /host_bin \
-        --data-dir /data \
-        --search-space /search_space.json \
-        --log-dir /logs \
-        --fold-scheme "${FOLD_SCHEME}" \
-        --n-workers "${N_WORKERS}" \
-        --timeout-s "${TRIAL_TIMEOUT_S}"
+echo "RQ=${RQ} N_WORKERS=${N_WORKERS} TIMEOUT=${TRIAL_TIMEOUT_S}s FOLD_SCHEME=${FOLD_SCHEME} USE_CONTAINER=${USE_CONTAINER}"
+
+if [ "${USE_CONTAINER}" = "1" ]; then
+    srun --ntasks=1 apptainer run \
+        --writable-tmpfs \
+        --bind "${DATA_CACHE}:/data" \
+        --bind "${LOG_DIR}:/logs" \
+        --bind "${HOST_BIN}:/host_bin:ro" \
+        --bind "${SEARCH_SPACE}:/search_space.json:ro" \
+        --env N_WORKERS="${N_WORKERS}" \
+        --env TRIAL_TIMEOUT_S="${TRIAL_TIMEOUT_S}" \
+        "${IMAGE}" \
+        hpc/run_optuna.py \
+            --rq "${RQ}" \
+            --host-bin /host_bin \
+            --data-dir /data \
+            --search-space /search_space.json \
+            --log-dir /logs \
+            --fold-scheme "${FOLD_SCHEME}" \
+            --n-workers "${N_WORKERS}" \
+            --timeout-s "${TRIAL_TIMEOUT_S}"
+else
+    # No-container path: the compute node mounts the same Lustre as the login
+    # node, so it sees the cloned repo, the populated .venv, and the dataset.
+    # Modules + uv must be on PATH on the compute node — we re-do them here
+    # since SLURM strips the user shell environment by default.
+    srun --ntasks=1 bash -c "
+        set -euo pipefail
+        if command -v module >/dev/null 2>&1; then
+            module load cmake/3.29.6 gcc/13.3.0 2>/dev/null || true
+        fi
+        export PATH=\"\$HOME/.local/bin:\$PATH\"
+        cd '${SLURM_SUBMIT_DIR}'
+        uv run hpc/run_optuna.py \
+            --rq '${RQ}' \
+            --host-bin '${HOST_BIN}' \
+            --data-dir '${DATA_CACHE}' \
+            --search-space '${SEARCH_SPACE}' \
+            --log-dir '${LOG_DIR}' \
+            --fold-scheme '${FOLD_SCHEME}' \
+            --n-workers '${N_WORKERS}' \
+            --timeout-s '${TRIAL_TIMEOUT_S}'
+    "
+fi
 
 # ---- collect ------------------------------------------------------------
 
