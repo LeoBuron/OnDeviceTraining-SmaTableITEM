@@ -21,7 +21,7 @@ FOLD_SCHEME="${FOLD_SCHEME:-LOSO}"
 USE_CONTAINER="${USE_CONTAINER:-0}"
 
 say "Pre-flight checks"
-required=("hpc/bin/${RQ}.host" "hpc/search_space/rq0_toy.json" "hpc/run_optuna_amplitude.sh")
+required=("hpc/bin/${RQ}.host" "hpc/search_space/${RQ}.json" "hpc/run_optuna_amplitude.sh")
 if [ "${USE_CONTAINER}" = "1" ]; then
     required+=("hpc/run_container.sif")
 fi
@@ -60,6 +60,9 @@ echo
 
 say "Final accounting"
 sacct -j "${JOBID}" --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS,ReqCPUs 2>&1 | head -10 || true
+JOB_STATE=$(sacct -j "${JOBID}.batch" -n -X -o State 2>/dev/null | head -1 | tr -d '[:space:]')
+JOB_EXITCODE=$(sacct -j "${JOBID}.batch" -n -X -o ExitCode 2>/dev/null | head -1 | tr -d '[:space:]' | cut -d: -f1)
+echo "    parsed: state=${JOB_STATE} exit_code=${JOB_EXITCODE}"
 
 say "slurm stdout (smatable_optuna_${JOBID}.out)"
 if [ -f "smatable_optuna_${JOBID}.out" ]; then
@@ -89,4 +92,12 @@ else
     echo "    MISSING: ${EXPDIR}"
 fi
 
+# Reflect the slurm job's exit in the wrapper's exit so the trailer's PASS/FAIL
+# is honest. (Otherwise a sbatch-submitted job that FAILED would still log PASS
+# because the wrapper itself ran cleanly to completion.)
+if [ "${JOB_STATE:-UNKNOWN}" != "COMPLETED" ] || [ "${JOB_EXITCODE:-1}" != "0" ]; then
+    echo
+    echo "FAIL — slurm job ${JOBID} state=${JOB_STATE} exit=${JOB_EXITCODE}"
+    exit 1
+fi
 pass
