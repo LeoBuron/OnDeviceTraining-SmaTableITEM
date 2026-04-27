@@ -29,7 +29,12 @@ expect "'-> hpc/bin/rq0_toy_synthetic.host' written."
 ls -la hpc/bin/rq0_toy_synthetic.host
 
 say "Build the L1 equivalence test"
-cmake --preset HOST-Debug -DODT_EXAMPLE=rq0_toy_synthetic -DODT_L1_TEST=ON 2>&1 | tail -3
+# Point the baked-backend include search at the active dataset's parent dir
+# (the prep tree on Lustre, NOT the empty repo-local data/).
+cmake --preset HOST-Debug \
+    -DODT_EXAMPLE=rq0_toy_synthetic \
+    -DODT_L1_TEST=ON \
+    -DSMATABLE_DATA_INCLUDE_DIR="$(dirname "${DATA_DIR}")" 2>&1 | tail -3
 cmake --build --preset HOST-Debug --target dataset_l1_equiv 2>&1 | tail -5
 
 say "L1 — NPY backend ≡ baked backend (LOSO fold 0)"

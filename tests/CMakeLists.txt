@@ -17,6 +17,12 @@ set(L1_FOLD        "00"   CACHE STRING "fold index used by L1 test")
 set(L1_BAKED_TRAIN "smatable/folds/${L1_FOLD_SCHEME}/fold_${L1_FOLD}_train.h" CACHE STRING "")
 set(L1_BAKED_TEST  "smatable/folds/${L1_FOLD_SCHEME}/fold_${L1_FOLD}_test.h"  CACHE STRING "")
 
+# SMATABLE_DATA_INCLUDE_DIR is the directory whose `smatable/` subdir
+# contains the prep-generated fold headers. Default points at the repo's
+# data/ tree; override on amplitude where prep writes to $HPC_HOME/data/.
+set(SMATABLE_DATA_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/data" CACHE PATH
+    "Directory containing the smatable/folds/<scheme>/fold_*.h headers.")
+
 add_library(smatable_npy_l1 OBJECT
     ${CMAKE_SOURCE_DIR}/src/dataset/smatable_dataset_npy.c)
 target_compile_definitions(smatable_npy_l1 PRIVATE
@@ -35,8 +41,7 @@ target_compile_definitions(smatable_baked_l1 PRIVATE
     DEBUG_MODE_ERROR)
 target_include_directories(smatable_baked_l1 PRIVATE
     ${CMAKE_SOURCE_DIR}/src/include
-    ${CMAKE_SOURCE_DIR}/data
-    /tmp/smatable-fixtures   # convenience for local synthetic runs
+    ${SMATABLE_DATA_INCLUDE_DIR}
     $<TARGET_PROPERTY:HOST,INCLUDE_DIRECTORIES>)
 
 add_executable(dataset_l1_equiv
