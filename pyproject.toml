@@ -10,5 +10,13 @@ dependencies = [
     "optuna-dashboard>=0.20.0",
     "pandas>=3.0.2",
     "seaborn>=0.13.2",
+]
+
+[dependency-groups]
+# torch is only needed by the local PyTorch reference scripts under
+# src/examples/reference/ — never inside an Optuna trial. Keeping it in a dev
+# group means the Apptainer container can `uv sync --no-dev` and skip the
+# 2.4 GB nvidia-* CUDA wheels torch pulls in transitively.
+dev = [
     "torch>=2.3",
 ]

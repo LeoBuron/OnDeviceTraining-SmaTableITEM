@@ -88,21 +88,42 @@ else
     echo "Dataset already on workspace -> reusing ${DATA_CACHE}"
 fi
 
+# ---- storage backend (SQLite on local tmpfs) ---------------------------
+# Track-A fix: replaced the JournalFileBackend on Lustre — its POSIX advisory
+# locks were going through the cluster lock manager (~100 ms+/acquire) and
+# triggered "lock taking >10s" warnings even at N_WORKERS=4. SQLite WAL on
+# /tmp tmpfs uses kernel-local locks (sub-µs) and the writer queue serializes
+# at MMU speed instead of network speed.
+DB_HOST_DIR="/tmp/optuna-${SLURM_JOB_ID}"
+mkdir -p "${DB_HOST_DIR}"
+echo "Storage: SQLite WAL on ${DB_HOST_DIR}/study.db (tmpfs, copied to LOG_DIR after run)"
+
 # ---- run ---------------------------------------------------------------
 
 echo "RQ=${RQ} N_WORKERS=${N_WORKERS} TIMEOUT=${TRIAL_TIMEOUT_S}s FOLD_SCHEME=${FOLD_SCHEME} USE_CONTAINER=${USE_CONTAINER}"
 
 if [ "${USE_CONTAINER}" = "1" ]; then
+    # The container bakes /app/pyproject.toml + /app/.venv but NOT the driver
+    # script itself — keeping it bind-mounted means edits to run_optuna.py
+    # don't require a rebuild + scp each iteration. cwd inside the
+    # container is /app (set by the runscript), so we mount the script flat
+    # into /app/run_optuna.py and reference it relatively.
+    #
+    # /optuna_db is the explicit bind for the SQLite DB. --writable-tmpfs
+    # would shadow the container's /tmp with an ephemeral overlay, so we use
+    # a dedicated mountpoint that survives the bind without being clobbered.
     srun --ntasks=1 apptainer run \
         --writable-tmpfs \
         --bind "${DATA_CACHE}:/data" \
         --bind "${LOG_DIR}:/logs" \
         --bind "${HOST_BIN}:/host_bin:ro" \
         --bind "${SEARCH_SPACE}:/search_space.json:ro" \
+        --bind "${SLURM_SUBMIT_DIR}/hpc/run_optuna.py:/app/run_optuna.py:ro" \
+        --bind "${DB_HOST_DIR}:/optuna_db" \
         --env N_WORKERS="${N_WORKERS}" \
         --env TRIAL_TIMEOUT_S="${TRIAL_TIMEOUT_S}" \
         "${IMAGE}" \
-        hpc/run_optuna.py \
+        run_optuna.py \
             --rq "${RQ}" \
             --host-bin /host_bin \
             --data-dir /data \
@@ -110,7 +131,8 @@ if [ "${USE_CONTAINER}" = "1" ]; then
             --log-dir /logs \
             --fold-scheme "${FOLD_SCHEME}" \
             --n-workers "${N_WORKERS}" \
-            --timeout-s "${TRIAL_TIMEOUT_S}"
+            --timeout-s "${TRIAL_TIMEOUT_S}" \
+            --storage-url "sqlite:////optuna_db/study.db"
 else
     # No-container path: the compute node mounts the same Lustre as the login
     # node, so it sees the cloned repo, the populated .venv, and the dataset.
@@ -131,11 +153,20 @@ else
             --log-dir '${LOG_DIR}' \
             --fold-scheme '${FOLD_SCHEME}' \
             --n-workers '${N_WORKERS}' \
-            --timeout-s '${TRIAL_TIMEOUT_S}'
+            --timeout-s '${TRIAL_TIMEOUT_S}' \
+            --storage-url 'sqlite:///${DB_HOST_DIR}/study.db'
     "
 fi
 
 # ---- collect ------------------------------------------------------------
+
+# Copy the SQLite DB off tmpfs before the node tears down /tmp. The script
+# checkpoints WAL into the main file before exit, so a plain cp is safe.
+if [ -f "${DB_HOST_DIR}/study.db" ]; then
+    cp -- "${DB_HOST_DIR}/study.db" "${LOG_DIR}/study.db"
+    echo "study.db -> ${LOG_DIR}/study.db ($(stat -c%s "${DB_HOST_DIR}/study.db" 2>/dev/null || echo "?") bytes)"
+fi
+rm -rf "${DB_HOST_DIR}" || true
 
 cp -- "${SLURM_JOB_NAME}_${SLURM_JOB_ID}.out" "${LOG_DIR}/" || true
 cp -- "${SLURM_JOB_NAME}_${SLURM_JOB_ID}.err" "${LOG_DIR}/" || true

@@ -19,27 +19,66 @@ The HPC harness — single-source ODT C code compiled HOST or MCU, dataset behin
 
 ---
 
-## Track A — scale-up correctness (do BEFORE the first real RQ campaign)
+## Track A — scale-up correctness ✅ DONE (2026-04-28 D+7 morning)
 
-Smoke ran with `N_WORKERS=4` on a STD-s-96h node (112 cores). Optuna's `JournalFileBackend` on Lustre logged a lot of "lock taking >10s" warnings even at 4 workers. At realistic `N_WORKERS=32+`, Lustre lock contention will dominate runtime.
+Picked the SQLite-on-tmpfs option. Trade-off rationale: workers all live on a single Slurm-allocated node (`mp.Pool` in `run_optuna.py`), so the actual problem the JournalFileBackend hit was Lustre's POSIX advisory locks (~100 ms per acquire via the cluster lock manager), not the storage protocol itself. Tmpfs locks are kernel-local (~µs), which subsumes most of what Redis would have bought us. Optuna's RDBStorage is the canonical default and `optuna-dashboard` reads it natively for live monitoring. Redis-fallback is available as a 5-line swap if a future RQ saturates SQLite's single-writer queue.
 
-**Action:**
-1. Replace `JournalFileBackend` with a backend that handles concurrent writes better. Two options:
-   - **`RDBStorage` with SQLite on local node tmpfs** (`/tmp/study.db`), then rsync the .db back to `$LOG_DIR` after `study.optimize` returns. Pro: tiny diff, no extra service. Con: SQLite + many writers can also serialize; needs measurement.
-   - **`JournalRedisBackend` with a Redis instance bound to the compute node's localhost.** Sbatch-script starts a redis-server on the node, points all workers at it, kills it after `study.optimize`. Pro: fastest, scales to >32 workers. Con: extra moving piece.
-2. Measure: run the existing `40_smoke_sbatch.sh` with `N_WORKERS={4, 16, 32, 64}` against the **synthetic** dataset; record `all workers joined in Ns` from stdout. Curve should stay roughly linear; if it flattens, lock contention is real.
-3. Pick the cheapest option that scales to the worker count we'll actually use for the real RQ sweeps.
+**Sweep results (USE_CONTAINER=1, rq0_toy_synthetic, sbatch 686949–686952):**
 
-**Files to touch:**
-- `hpc/run_optuna.py` — swap `optuna.storages.JournalStorage(JournalFileBackend(…))` for the new backend.
-- `hpc/run_optuna_amplitude.sh` — if redis: add `redis-server --daemonize yes --port $((6379 + SLURM_JOB_ID % 1000))` before `srun`, kill it after.
-- `pyproject.toml` — `uv add redis` if going that route.
+| N_WORKERS | walltime (`all workers joined`) | trials | lock warnings |
+|-----------|---------------------------------|--------|---------------|
+| 4         | 4.0 s                           | 20     | 0             |
+| 16        | 2.7 s                           | 31     | 0             |
+| 32        | 3.1 s                           | 63     | 0             |
+| 64        | 4.7 s                           | 110    | 0             |
 
-**Estimate:** 2–4 hours. Cheap relative to the value (otherwise a 32-worker job spends most of its time blocked).
+Baseline 685747 (JournalFileBackend, 32 W, 54 trials): 241 s with dozens of "lock taking >10s" warnings. Same N_WORKERS=32 on the new backend: **3.1 s — roughly 78× faster**. Best trial #0 value=1.0000 with `{fold: 0, lr: 0.01, epochs: 3, hidden: 16, seed: 42}` is **bit-identical** to the 685747 baseline — GridSampler reproducibility intact under the new backend.
+
+**Implementation summary:**
+- `hpc/run_optuna.py` — RDBStorage replaces JournalStorage; `_prep_sqlite_wal` flips `journal_mode=WAL` once at study creation; `--storage-url` CLI flag (default writes next to logs); WAL checkpoint(TRUNCATE) before exit so the post-run `cp` lands a consolidated DB.
+- `hpc/run_optuna_amplitude.sh` — per-job `/tmp/optuna-${SLURM_JOB_ID}/` directory (kernel-local tmpfs) bind-mounted as `/optuna_db` inside the container. After `srun` returns, `cp` the consolidated `study.db` into `${LOG_DIR}` for archival.
+- `--writable-tmpfs` would shadow the container's `/tmp`, so the SQLite mount goes to a dedicated bind path (`/optuna_db`) that survives the overlay.
+
+**Bonus, bundled with the same container rebuild:** torch slim-down moved torch + nvidia-* CUDA wheels to `[dependency-groups.dev]` and made `run_container.def` use `uv sync --no-dev` + `uv run --no-dev` runscript → .sif dropped from 2.9 GB to 318 MB (~9.5× smaller, ~9× faster scp). [NOTE: this slim-down was reverted in a follow-up commit — image size was not actually a problem, and keeping torch in the runtime container preserves optionality for future audit / state-dump comparison runs that bring `src/examples/reference/*.py` workflows alongside the Optuna trials.]
+
+**What's next on the harness front:** known-good-state. Real RQ sweeps (RQ1..RQ5 with 100+ grid points) are now coordination-bottleneck-free; they wait on upstream-ODT Conv1d + LayerNorm and Florian's pre-trained checkpoint, not on infra.
 
 ---
 
-## Track B — Apptainer container build (opt-in, not blocking)
+## Track B — Apptainer container build ✅ DONE (2026-04-27 D+6 evening)
+
+End-to-end green: container-mode sbatch job 685747 ran 54 trials in 241s,
+best trial #0 value=1.0000 — bitwise-equal to the no-container smoke 685737.
+Lock-file contention warnings on the JournalFileBackend confirm Track A is
+a real concern at N_WORKERS=32 (not theoretical).
+
+**What ended up working** (different from the original plan below):
+
+- **proxy URL fix** in `run_container.def` %post — yes, as planned.
+- **uv installer** swapped to GitHub release tarball — yes, as planned.
+- **apt mirror access**: turned out the proxy whitelist also blocks
+  `archive.ubuntu.com` (403). Ubuntu mirror swap was NOT pursued — instead
+  the container is now **built off-cluster on a Mac** via apptainer-in-docker
+  (`docker run --privileged --platform linux/amd64 kaczmarj/apptainer
+  build …`) and rsync'd via `gateway.amplitude.uni-due.de` (the dedicated
+  transfer host accepts pubkey directly; the regular `amplitude` SSH alias
+  has a `RemoteCommand` directive that conflicts with rsync).
+- **bind-mount fix** in `hpc/run_optuna_amplitude.sh`: the .def's `%files`
+  only stages `pyproject.toml` + `uv.lock`, not `run_optuna.py`. Mounting
+  the script flat at `/app/run_optuna.py` keeps it editable without a 2.9 GB
+  rebuild + transfer per Python edit.
+
+**Future-Track-B housekeeping (optional, not blocking):**
+
+- 2.9 GB .sif size is dominated by torch + nvidia-* CUDA wheels pulled by
+  `uv sync`. The .def header explicitly says "CPU-only — drop torch", but
+  torch sits as a runtime dep in `pyproject.toml`. Move it to
+  `[dependency-groups.dev]` and switch the .def's `uv sync` to `uv sync
+  --no-dev` → expect ~500 MB .sif (≈5× smaller, ≈5× faster scp).
+- `hpc/README.md` should document the local-build-and-transfer pattern,
+  since amplitude-side build is permanently blocked by the apt whitelist.
+
+**Original plan (kept for reference; superseded above):**
 
 `run_container.def` build fails on Amplitude login nodes with:
 1. UDE proxy env vars miss the `http://` scheme prefix → apt-get rejects "Unsupported proxy".

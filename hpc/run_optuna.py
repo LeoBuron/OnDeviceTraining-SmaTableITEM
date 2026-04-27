@@ -6,8 +6,13 @@ outside this script). The binary reads its hyperparams + dataset fold from
 env vars and prints a single `RESULT ...` line to stdout (see the
 per-RQ contract in docs/superpowers/specs/2026-04-27-hpc-experiment-harness-design.md).
 
-Multi-process coordination is via Optuna's JournalFileBackend storage
-(file-based, lock-free, identical pattern to the reference repo).
+Multi-process coordination is via Optuna's RDBStorage. For SQLite URLs we
+flip the underlying file to WAL mode before any Optuna operation runs, which
+gives multi-reader / single-writer concurrency suitable for N_WORKERS=64.
+Place the .db on local tmpfs (/tmp on the compute node) — Lustre POSIX
+advisory locks saturate the cluster lock manager and were the actual cause
+of the "lock taking >10s" warnings on the previous JournalFileBackend
+implementation (sbatch 685747).
 
 Usage (local smoke test):
 
@@ -31,6 +36,7 @@ import json
 import multiprocessing as mp
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -40,8 +46,7 @@ from pathlib import Path
 
 import optuna
 from optuna.samplers import GridSampler
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend
+from optuna.storages import RDBStorage
 
 
 RESULT_RE = re.compile(r"^RESULT\s+(.*)$", re.MULTILINE)
@@ -136,13 +141,43 @@ def make_objective(*, host_bin: Path, data_dir: Path, fold_scheme: str,
     return objective
 
 
-def worker(_idx, *, journal_path: Path, study_name: str, host_bin: Path,
+SQLITE_PREFIX = "sqlite:///"
+
+
+def _sqlite_path(storage_url: str) -> Path | None:
+    """Extract the on-disk path from a SQLAlchemy SQLite URL, or None."""
+    if not storage_url.startswith(SQLITE_PREFIX):
+        return None
+    return Path(storage_url[len(SQLITE_PREFIX):])
+
+
+def _prep_sqlite_wal(db_path: Path) -> None:
+    """One-shot: ensure the SQLite file exists and is in WAL mode with a
+    relaxed durability fsync setting. WAL is persisted in the DB header, so
+    every later Optuna connection inherits it automatically."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(db_path)) as con:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+
+
+def make_storage(storage_url: str) -> RDBStorage:
+    """Build the RDBStorage. Long busy_timeout (60 s) replaces the noisy
+    JournalFileBackend "lock taking >10s" warnings: SQLite blocks silently
+    until the timeout, then raises — that's our actual saturation signal."""
+    return RDBStorage(
+        url=storage_url,
+        engine_kwargs={"connect_args": {"timeout": 60.0}},
+    )
+
+
+def worker(_idx, *, storage_url: str, study_name: str, host_bin: Path,
            data_dir: Path, fold_scheme: str, search_space: dict, log_dir: Path,
            timeout_s: float):
     """One worker process. Re-opens the shared study (load_if_exists), then
     optimize() drains enqueued trials cooperatively with the other workers
-    via the file-journal lock."""
-    storage = JournalStorage(JournalFileBackend(file_path=str(journal_path)))
+    via the SQLite WAL writer queue."""
+    storage = make_storage(storage_url)
     study = optuna.load_study(study_name=study_name, storage=storage,
                               sampler=GridSampler(search_space=search_space, seed=42))
     obj = make_objective(host_bin=host_bin, data_dir=data_dir,
@@ -169,6 +204,13 @@ def main() -> int:
                    help="default scheme if 'fold_scheme' is not in the search space")
     p.add_argument("--n-workers", type=int, default=int(os.getenv("N_WORKERS", "2")))
     p.add_argument("--timeout-s", type=float, default=float(os.getenv("TRIAL_TIMEOUT_S", "300")))
+    p.add_argument(
+        "--storage-url",
+        default=None,
+        help="SQLAlchemy URL for Optuna RDBStorage. Default: sqlite:////<run_dir>/study.db. "
+             "On Amplitude, run_optuna_amplitude.sh overrides this with a /tmp tmpfs path "
+             "and copies the resulting .db back to LOG_DIR after study.optimize returns.",
+    )
     args = p.parse_args()
 
     if not args.host_bin.exists():
@@ -184,11 +226,15 @@ def main() -> int:
     study_name = f"{args.rq}--{timestamp}"
     run_dir = args.log_dir / study_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    journal_path = run_dir / "journal.log"
-    print(f"study: {study_name}")
-    print(f"journal: {journal_path}")
 
-    storage = JournalStorage(JournalFileBackend(file_path=str(journal_path)))
+    storage_url = args.storage_url or f"sqlite:///{run_dir / 'study.db'}"
+    sqlite_path = _sqlite_path(storage_url)
+    if sqlite_path is not None:
+        _prep_sqlite_wal(sqlite_path)
+    print(f"study: {study_name}")
+    print(f"storage: {storage_url}")
+
+    storage = make_storage(storage_url)
     study = optuna.create_study(
         direction="maximize",
         storage=storage,
@@ -204,7 +250,7 @@ def main() -> int:
         # in-process for ease of debugging
         worker(
             0,
-            journal_path=journal_path, study_name=study_name,
+            storage_url=storage_url, study_name=study_name,
             host_bin=args.host_bin.resolve(), data_dir=args.data_dir.resolve(),
             fold_scheme=args.fold_scheme,
             search_space=search_space, log_dir=run_dir, timeout_s=args.timeout_s,
@@ -214,7 +260,7 @@ def main() -> int:
             pool.map(
                 partial(
                     worker,
-                    journal_path=journal_path, study_name=study_name,
+                    storage_url=storage_url, study_name=study_name,
                     host_bin=args.host_bin.resolve(), data_dir=args.data_dir.resolve(),
                     fold_scheme=args.fold_scheme,
                     search_space=search_space, log_dir=run_dir,
@@ -224,6 +270,13 @@ def main() -> int:
             )
     wall = time.time() - t0
     print(f"all workers joined in {wall:.1f}s")
+
+    # Fold the WAL back into the main DB before any rsync — otherwise the
+    # post-job copy could leave a study.db whose recent commits live only in
+    # study.db-wal and would be lost without the matching -wal/-shm files.
+    if sqlite_path is not None and sqlite_path.exists():
+        with sqlite3.connect(str(sqlite_path)) as con:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     # dump CSV of completed trials
     completed = study.get_trials(deepcopy=False)

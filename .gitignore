@@ -47,6 +47,7 @@ src/examples/data/*-ubyte
 # HPC harness — generated artifacts, not source.
 /hpc/bin/
 /hpc/run_container.sif
+/hpc/run_container.sif.*
 # SmaTable canonical buffer + folds (regenerable via tools/prep_smatable.py).
 /data/smatable/
 # Amplitude test-script transient logs (and any other .log files anywhere).

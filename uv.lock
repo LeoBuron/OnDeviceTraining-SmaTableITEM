@@ -685,6 +685,10 @@ dependencies = [
     { name = "optuna-dashboard" },
     { name = "pandas" },
     { name = "seaborn" },
+]
+
+[package.dev-dependencies]
+dev = [
     { name = "torch" },
 ]
 
@@ -696,8 +700,10 @@ requires-dist = [
     { name = "optuna-dashboard", specifier = ">=0.20.0" },
     { name = "pandas", specifier = ">=3.0.2" },
     { name = "seaborn", specifier = ">=0.13.2" },
-    { name = "torch", specifier = ">=2.3" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "torch", specifier = ">=2.3" }]
 
 [[package]]
 name = "optuna"
