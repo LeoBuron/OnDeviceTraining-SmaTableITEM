@@ -1,0 +1,108 @@
+#!/bin/bash
+# sbatch script for one Optuna campaign on Amplitude (UDE).
+#
+# Pattern adapted from /Users/leo/work/smatable-offline/run_gridsearch_amplitude.sh:
+#   - CPU partition (no --gres=gpu).
+#   - ws_allocate / ws_find for Lustre scratch (the workspace persists 30d).
+#   - Dataset rsync'd to scratch on first run, reused on subsequent runs.
+#   - Apptainer container bind-mounts /data, /logs, /search_space.json.
+#   - Pre-built per-RQ HOST binary in hpc/bin/<rq>.host (built by build_all_rqs.sh).
+#
+# Submit:  sbatch hpc/run_optuna_amplitude.sh
+# Override:  sbatch --export=ALL,RQ=rq1_replay_buffer hpc/run_optuna_amplitude.sh
+#
+#SBATCH --job-name=smatable_optuna
+#SBATCH --partition=standard
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=128G
+#SBATCH --time=12:00:00
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
+
+set -euo pipefail
+
+cd "$SLURM_SUBMIT_DIR"
+
+echo "JobID: ${SLURM_JOB_ID}"
+echo "Node:  ${SLURM_NODELIST}"
+echo "Submit dir: ${SLURM_SUBMIT_DIR}"
+
+# ---- configuration -------------------------------------------------------
+
+RQ="${RQ:-rq0_toy_synthetic}"
+N_WORKERS="${N_WORKERS:-32}"
+TRIAL_TIMEOUT_S="${TRIAL_TIMEOUT_S:-300}"
+FOLD_SCHEME="${FOLD_SCHEME:-LOSO}"
+
+IMAGE="${SLURM_SUBMIT_DIR}/hpc/run_container.sif"
+HOST_BIN_REL="hpc/bin/${RQ}.host"
+HOST_BIN="${SLURM_SUBMIT_DIR}/${HOST_BIN_REL}"
+SEARCH_SPACE_REL="hpc/search_space/${RQ}.json"
+SEARCH_SPACE="${SLURM_SUBMIT_DIR}/${SEARCH_SPACE_REL}"
+DATASET_SRC="${HPC_HOME}/data/smatable"
+FINAL_LOG_DIR="${HPC_HOME}/experiments"
+
+WS_NAME="smatable-ws"
+WS_DAYS=30
+
+if [ ! -f "${IMAGE}" ];        then echo "missing image: ${IMAGE}"; exit 1; fi
+if [ ! -f "${HOST_BIN}" ];     then echo "missing HOST binary: ${HOST_BIN} (run hpc/build_all_rqs.sh)"; exit 1; fi
+if [ ! -f "${SEARCH_SPACE}" ]; then echo "missing search space: ${SEARCH_SPACE}"; exit 1; fi
+
+# ---- workspace -----------------------------------------------------------
+
+if ws_find "${WS_NAME}" >/dev/null 2>&1; then
+    WS_PATH="$(ws_find "${WS_NAME}" | tail -n 1)"
+    echo "Workspace exists: ${WS_NAME} -> ${WS_PATH}"
+else
+    echo "Allocating workspace: ws_allocate ${WS_NAME} ${WS_DAYS}"
+    ws_allocate "${WS_NAME}" "${WS_DAYS}"
+    WS_PATH="$(ws_find "${WS_NAME}" | tail -n 1)"
+fi
+
+JOB_SCRATCH="${WS_PATH}/jobs/${SLURM_JOB_ID}"
+DATA_CACHE="${WS_PATH}/datasets/smatable"
+LOG_DIR="${JOB_SCRATCH}/logs"
+mkdir -p "${JOB_SCRATCH}" "${LOG_DIR}" "${WS_PATH}/datasets"
+
+# ---- dataset -------------------------------------------------------------
+
+if [ ! -d "${DATA_CACHE}" ] || [ -z "$(ls -A "${DATA_CACHE}" 2>/dev/null || true)" ]; then
+    echo "Dataset not on workspace -> rsync from ${DATASET_SRC}"
+    mkdir -p "${DATA_CACHE}"
+    rsync -a "${DATASET_SRC}/" "${DATA_CACHE}/"
+else
+    echo "Dataset already on workspace -> reusing ${DATA_CACHE}"
+fi
+
+# ---- run ---------------------------------------------------------------
+
+echo "RQ=${RQ} N_WORKERS=${N_WORKERS} TIMEOUT=${TRIAL_TIMEOUT_S}s FOLD_SCHEME=${FOLD_SCHEME}"
+srun --ntasks=1 apptainer run \
+    --writable-tmpfs \
+    --bind "${DATA_CACHE}:/data" \
+    --bind "${LOG_DIR}:/logs" \
+    --bind "${HOST_BIN}:/host_bin:ro" \
+    --bind "${SEARCH_SPACE}:/search_space.json:ro" \
+    --env N_WORKERS="${N_WORKERS}" \
+    --env TRIAL_TIMEOUT_S="${TRIAL_TIMEOUT_S}" \
+    "${IMAGE}" \
+    hpc/run_optuna.py \
+        --rq "${RQ}" \
+        --host-bin /host_bin \
+        --data-dir /data \
+        --search-space /search_space.json \
+        --log-dir /logs \
+        --fold-scheme "${FOLD_SCHEME}" \
+        --n-workers "${N_WORKERS}" \
+        --timeout-s "${TRIAL_TIMEOUT_S}"
+
+# ---- collect ------------------------------------------------------------
+
+cp -- "${SLURM_JOB_NAME}_${SLURM_JOB_ID}.out" "${LOG_DIR}/" || true
+cp -- "${SLURM_JOB_NAME}_${SLURM_JOB_ID}.err" "${LOG_DIR}/" || true
+cp -- "${SEARCH_SPACE}"                       "${LOG_DIR}/" || true
+
+mkdir -p "${FINAL_LOG_DIR}"
+rsync -a "${LOG_DIR}/" "${FINAL_LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}/"
+echo "Logs copied to ${FINAL_LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}/"

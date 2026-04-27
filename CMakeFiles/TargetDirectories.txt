@@ -1,2 +1,0 @@
-/Users/leo/work/OnDeviceTraining-base-project/CMakeFiles/edit_cache.dir
-/Users/leo/work/OnDeviceTraining-base-project/CMakeFiles/rebuild_cache.dir

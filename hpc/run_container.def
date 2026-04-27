@@ -1,0 +1,48 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+# CPU-only container for the SmaTable HPC harness on Amplitude. No CUDA —
+# every Optuna trial is an FP32 ODT subprocess run on CPU. The diff vs.
+# the reference smatable-offline container is exactly that: drop CUDA,
+# drop torch (lazy: optuna alone is enough), and bake the build toolchain
+# we need to compile per-RQ HOST binaries inside the image.
+#
+# Note on FetchContent: pico-sdk + OnDeviceTraining are NOT fetched here.
+# `cmake --preset PREPARE` runs outside the container on the login node so
+# the source tree (and its Lustre-resident pico-sdk/ODT clones) persists
+# across jobs without rebuilding the image.
+
+%files
+    pyproject.toml /app/pyproject.toml
+    uv.lock        /app/uv.lock
+
+%post
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        clang ninja-build cmake \
+        python3
+    rm -rf /var/lib/apt/lists/*
+
+    curl -LsSf https://astral.sh/uv/install.sh | env \
+        UV_INSTALL_DIR=/usr/local/bin \
+        INSTALLER_NO_MODIFY_PATH=1 \
+        sh
+
+    export UV_PYTHON_INSTALL_DIR=/opt/uv/python
+    export UV_CACHE_DIR=/tmp/uv-cache
+    export UV_PROJECT_ENVIRONMENT=/app/.venv
+
+    cd /app
+    uv python install
+    uv sync
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+    export UV_PYTHON_INSTALL_DIR=/opt/uv/python
+    export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/uv-cache}
+    export UV_PROJECT_ENVIRONMENT=/app/.venv
+
+%runscript
+    cd /app
+    exec uv run "$@"

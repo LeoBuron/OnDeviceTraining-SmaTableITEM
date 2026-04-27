@@ -43,3 +43,9 @@ src/examples/data/*-ubyte
 
 # Per-run CSV logs from compare-harness runs (ODT + PyTorch per-seed)
 /runs/
+
+# HPC harness — generated artifacts, not source.
+/hpc/bin/
+/hpc/run_container.sif
+# SmaTable canonical buffer + folds (regenerable via tools/prep_smatable.py).
+/data/smatable/

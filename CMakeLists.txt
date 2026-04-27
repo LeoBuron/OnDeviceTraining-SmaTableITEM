@@ -100,6 +100,11 @@ elseif(${ODT_HOST_PLATFORM})
         target_compile_definitions(HOST PRIVATE
             DEPTH_SWEEP_HIDDEN_LAYERS=${DEPTH_SWEEP_HIDDEN_LAYERS})
     endif()
+    # SmaTable L1 dataset-backend equivalence test. Opt-in (-DODT_L1_TEST=ON)
+    # because it requires the prep step to have produced fold .h files.
+    if(ODT_L1_TEST)
+        add_subdirectory(tests)
+    endif()
 elseif(${ODT_TARGET} STREQUAL "STM32F756XG")
     add_subdirectory(cmake/stm32cubemx/stm32f756xg)
 elseif(${ODT_TARGET} STREQUAL "STM32L476XG")

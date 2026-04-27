@@ -6,6 +6,8 @@ requires-python = ">=3.13"
 dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.4",
+    "optuna>=4.8.0",
+    "optuna-dashboard>=0.20.0",
     "pandas>=3.0.2",
     "seaborn>=0.13.2",
     "torch>=2.3",
