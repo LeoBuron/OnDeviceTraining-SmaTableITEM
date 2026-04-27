@@ -12,12 +12,17 @@
 # Override:  sbatch --export=ALL,RQ=rq1_replay_buffer hpc/run_optuna_amplitude.sh
 #
 #SBATCH --job-name=smatable_optuna
-#SBATCH --partition=standard
+#SBATCH --partition=STD-s-96h
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
+# Partition naming convention on amplitUDE is s/m/l = small/medium/large
+# *node-count*, NOT walltime. STD-l-12h has MinNodes=93 (≥93 nodes per job),
+# STD-m-48h has MinNodes=46, STD-s-96h is the default for single-node jobs.
+# We submit one node, so STD-s-96h. (Walltime cap there is 96 h, way more
+# than our --time=12:00:00 needs.)
 
 set -euo pipefail
 
