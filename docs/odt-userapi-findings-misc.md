@@ -23,8 +23,68 @@
 | S4 | `rngSetSeed(0) == rngSetSeed(1)` aliasing | Latent bug | Low |
 | S5 | `freeTensor` aborts on user-owned buffers | Documented footgun | Low |
 | S6 | `snprintf` between `init()` and `trainingRun()` → latent `exit(1)` | Latent memory bug | Medium |
+| F7 | `tensorInit` INT32 path treats input as `float*` → destroys int32 inputs from NPYLoader | **CONFIRMED — bug** | High (silent) |
 
 Two High-priority findings drive Plan 3 issue-filing: **F1 (CE-gradient 32× scaling)** — the primary divergence source behind the Phase-5e FAILs — and **F2 (DataLoader indices under-init)** — a surprise bonus bug surfaced during H3 that silently caps per-epoch unique samples at ~3% of the dataset on every ODT training run in every example in this repo.
+
+---
+
+## Finding F7: tensorInit INT32 path destroys int32 inputs (High Priority, surfaced 2026-04-27)
+
+**Kategorie:** Bug / Silent Numerical Semantics. Surfaced during HPC-harness L1
+equivalence-test debugging (commit forthcoming).
+
+**Was:** `OnDeviceTraining/src/src/userApi/tensor/TensorApi.c:57-71` —
+`tensorInit(float *data, ...)` for `quantization->type == INT32` does:
+
+```c
+size_t size = 0;
+for (size_t i = 0; i < numberOfDims; i++) size += dims[i];      /* sum, not product! */
+int32_t *dataInt = *reserveMemory(size * sizeof(int32_t));
+for (size_t i = 0; i < size; i++)
+    dataInt[i] = (int32_t)data[i];                              /* float-cast int32 input! */
+```
+
+Two layered bugs in one function:
+
+1. **Element count is `sum(dims)`, not `prod(dims)`.** For a `[N]` shape, sum
+   == prod, so 1-D tensors happen to allocate correctly. For higher-rank
+   tensors, the buffer is dramatically undersized.
+2. **The input `data` is interpreted as `float*` and each element is
+   `(int32_t)`-cast.** When `npyLoad` reads an `<i4` .npy and passes the raw
+   int32 bytes through `tensorInit`, those bytes are reinterpreted as
+   float32 first (small floats → 0 after int cast). For our int32 fold-ID
+   files: every ID came back as 0, so every "train sample" resolved to global
+   sample 0 — perfect silent corruption.
+
+**Verifikation:** L1 backend-equivalence test
+(`tests/dataset_backend_equiv.c`, 2026-04-27): with NPY backend going through
+`npyLoad`-then-`tensorInit`, train[0] returned `x[0,0,0] = 0x1.f33f9cp-7`
+instead of `x[90,0,0] = -0x1.06d25ap-11` (the value the baked backend
+returned correctly from its compile-time integer slice).
+
+Worked around in `src/dataset/smatable_dataset_npy.c` by reading int32 .npy
+files directly via `openNPYFile + readHeader + fread` (function
+`readInt32NpyDirect`), bypassing `tensorInit` entirely.
+
+**Impact:**
+- Any NPY-loaded int32 tensor in any ODT example is silently zeroed.
+- Combined with F1 + F2, this completes the picture of why every existing
+  example with int32 labels (none, in this repo — MNIST labels are float32
+  one-hot which dodges the bug) would have produced meaningless training.
+- The new HPC harness in this repo would have produced fake 100% accuracy
+  results from constant-zero labels were it not for the L1 test catching it.
+
+**Suggested remedy:**
+- Fix the count: `size = calcNumberOfElementsByShape(...)`.
+- Fix the cast: take `int32_t *` (or `void *`) and `memcpy` instead of
+  per-element float-cast.
+- Add a unit test that loads an int32 .npy and asserts ID values round-trip.
+
+**Related:**
+- Same surface as F2 (DataLoader silent under-init) — both produce silent
+  fake training. F7 was caught by an L1-style cross-backend test that didn't
+  exist before this repo's harness work.
 
 ---
 
