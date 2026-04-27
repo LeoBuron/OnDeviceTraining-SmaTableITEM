@@ -18,14 +18,14 @@ cd "${REPO_ROOT}"
 RQ="${RQ:-rq0_toy_synthetic}"
 N_WORKERS="${N_WORKERS:-4}"
 FOLD_SCHEME="${FOLD_SCHEME:-LOSO}"
+USE_CONTAINER="${USE_CONTAINER:-0}"
 
 say "Pre-flight checks"
-for f in hpc/run_container.sif "hpc/bin/${RQ}.host" "hpc/search_space/${RQ%_*}_toy.json" "hpc/run_optuna_amplitude.sh"; do
-    case "$f" in
-        *_toy.json)
-            f="hpc/search_space/rq0_toy.json"
-            ;;
-    esac
+required=("hpc/bin/${RQ}.host" "hpc/search_space/rq0_toy.json" "hpc/run_optuna_amplitude.sh")
+if [ "${USE_CONTAINER}" = "1" ]; then
+    required+=("hpc/run_container.sif")
+fi
+for f in "${required[@]}"; do
     if [ ! -f "$f" ]; then
         echo "    MISSING: $f"
         exit 1
@@ -33,8 +33,8 @@ for f in hpc/run_container.sif "hpc/bin/${RQ}.host" "hpc/search_space/${RQ%_*}_t
     printf "    OK  %s\n" "$f"
 done
 
-say "sbatch submit"
-JOBID=$(sbatch --parsable --export="ALL,RQ=${RQ},N_WORKERS=${N_WORKERS},FOLD_SCHEME=${FOLD_SCHEME}" \
+say "sbatch submit (USE_CONTAINER=${USE_CONTAINER})"
+JOBID=$(sbatch --parsable --export="ALL,RQ=${RQ},N_WORKERS=${N_WORKERS},FOLD_SCHEME=${FOLD_SCHEME},USE_CONTAINER=${USE_CONTAINER}" \
         hpc/run_optuna_amplitude.sh)
 echo "    JobID = ${JOBID}"
 echo "${JOBID}" > "$(dirname "$0")/logs/last_job_id"
