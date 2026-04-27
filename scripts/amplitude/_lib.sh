@@ -5,12 +5,20 @@
 
 set -euo pipefail
 
-# Make user-installed binaries (uv, etc.) available across all amplitude
-# scripts even when the interactive shell hasn't been re-sourced. The export
-# in 20_setup.sh only persists for that subshell — putting it here covers
+# Make user-installed binaries (uv, ninja, etc.) available across all amplitude
+# scripts even when the interactive shell hasn't been re-sourced. The exports
+# in 20_setup.sh only persist for that subshell — putting it here covers
 # every NN_*.sh that comes after.
 if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
     export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Load HPC modules best-effort. Failures are non-fatal because these scripts
+# are also expected to work on dev machines (mac/linux) where `module` doesn't
+# exist. On amplitude these versions are confirmed present (module avail
+# 2026-04-27): cmake/3.29.6 + gcc/13.3.0 in /cluster/modulefiles/compiler.
+if command -v module >/dev/null 2>&1; then
+    module load cmake/3.29.6 gcc/13.3.0 2>/dev/null || true
 fi
 
 _SCRIPT_NAME="$(basename "${BASH_SOURCE[1]}" .sh)"

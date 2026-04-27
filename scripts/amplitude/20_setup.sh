@@ -42,6 +42,27 @@ export PATH="$HOME/.local/bin:${PATH}"
 uv --version
 uv sync 2>&1 | tail -10
 
+say "ninja install (if needed) — same proxy-via-github trick as uv"
+if ! command -v ninja >/dev/null 2>&1; then
+    NINJA_REL_URL="${NINJA_REL_URL:-https://github.com/ninja-build/ninja/releases/latest/download/ninja-linux.zip}"
+    say "Downloading ninja via proxy from ${NINJA_REL_URL}"
+    tmp="$(mktemp -d)"
+    curl -fsSL "${NINJA_REL_URL}" -o "${tmp}/ninja.zip"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q "${tmp}/ninja.zip" -d "${tmp}"
+    else
+        # Fallback if unzip is missing — Python is here via uv venv.
+        ( cd "${tmp}" && python3 -c "import zipfile; zipfile.ZipFile('ninja.zip').extractall()" )
+    fi
+    cp "${tmp}/ninja" "$HOME/.local/bin/ninja"
+    chmod +x "$HOME/.local/bin/ninja"
+    rm -rf "${tmp}"
+fi
+ninja --version
+
+say "Toolchain check (HPC modules + ninja)"
+which gcc g++ cmake ninja 2>&1 || true
+
 say "cmake --preset PREPARE (one-time fetch of pico-sdk + ODT)"
 if [ -d OnDeviceTraining/src ] && [ -d pico-sdk/src ]; then
     echo "    pico-sdk + ODT already fetched — skipping"
