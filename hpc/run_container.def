@@ -64,10 +64,7 @@ From: ubuntu:22.04
 
     cd /app
     uv python install
-    # --no-dev drops the [dependency-groups.dev] entries (torch + its CUDA
-    # wheels), keeping the image at ~500 MB. torch is only used by the local
-    # PyTorch reference scripts which never run inside the container.
-    uv sync --no-dev
+    uv sync
 
 %environment
     export PATH=/usr/local/bin:$PATH
@@ -77,8 +74,4 @@ From: ubuntu:22.04
 
 %runscript
     cd /app
-    # --no-dev mirrors the build-time `uv sync --no-dev`. Without it, `uv run`
-    # would re-resolve the project and try to install the dev group (torch +
-    # nvidia-* CUDA wheels) on every container start — failing on Amplitude
-    # because PyPI / files.pythonhosted.org are not on the proxy whitelist.
-    exec uv run --no-dev "$@"
+    exec uv run "$@"
