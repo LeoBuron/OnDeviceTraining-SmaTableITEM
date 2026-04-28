@@ -309,3 +309,27 @@ Observed during Plan 1.5 development: a `snprintf` call (or `gmtime_r`) placed b
 - Plan-1.5 failure context and gotchas: `docs/phase5e-failures.md` (Plan-2-outcome section at the end references this doc).
 - Reproducer binary: `src/examples/mlp_mnist_depth_sweep_host.c` (parametrized by `-DDEPTH_SWEEP_HIDDEN_LAYERS={0,1,4}`; shuffle toggled by env `ODT_DISABLE_SHUFFLE`; single-batch dump via env `ODT_SINGLE_BATCH` + `ODT_STATE_DUMP_PATH`).
 - Numerical compare harness: `src/examples/reference/state_dump_compare.py`, `src/examples/reference/depth_sweep_ref.py`.
+
+## F8 — `reserveInferenceStats` sizes the output shape from the label's rank (heap overflow)
+
+- **Found:** 2026-07-07, by the stage-1 memory instrumentation (the exact-size
+  `ODT_MEM_PROFILE` allocator turns a silent overflow into a deterministic
+  SIGTRAP before any output; ASan-confirmed).
+- **Mechanism:** `userApi/InferenceApi.c` `reserveInferenceStats(label)`
+  allocates `inferenceStats->output`'s shape arrays via
+  `getShapeLike(label->shape)`; `inferenceWithLoss` later `copyShape()`s the
+  model's actual output shape (rank >= 2 after Flatten+Linear) into it. A
+  rank-1 label (`[NC]`) under-sizes `dimensions`/`orderOfDimensions` by one
+  `size_t` each -> out-of-bounds write on every eval. Silent under plain
+  calloc slack; fatal under `ODT_MEM_PROFILE`.
+- **Repro:** any Flatten->Linear(->Softmax) model + rank-1 label +
+  `inferenceWithLoss` (upstream's own kws_raw/har_classifier label shapes
+  hit the silent variant).
+- **Workaround (this repo):** rank-2 `[1, NC]` one-hot labels in
+  `stage1_pretrain.c` `buildSplit` (matches `conventions/loss.md`
+  `dimensions[0]=B`). Verified numerically transparent: bit-identical
+  training anchor, V1/V2 PyTorch parity unchanged (4.47e-8 / <=1.26e-7).
+- **Upstream fix suggestion:** size the copy destination from the SOURCE
+  shape (`getShapeLike(output->shape)`) or fail fast on rank mismatch inside
+  `copyShape`. Related doc divergence: `loss.md` calls B=1 outputs "[F]
+  implicit" while the runtime always produces rank >= 2.
