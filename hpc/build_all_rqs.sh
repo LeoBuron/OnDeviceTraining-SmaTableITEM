@@ -30,7 +30,11 @@ fi
 
 for rq in "${RQS[@]}"; do
     echo "==> building ${rq}"
-    cmake --preset HOST-Debug -DODT_EXAMPLE="${rq}" >/dev/null
+    # ODT_MEM_PROFILE=ON: turns on StorageApi's heap high-water counter (a
+    # relaxed atomic add per reserveMemory call) so production sweep binaries
+    # carry mem_heap_peak_b/mem_reconciliation_gap_b — overhead is negligible
+    # next to training time.
+    cmake --preset HOST-Debug -DODT_EXAMPLE="${rq}" -DODT_MEM_PROFILE=ON >/dev/null
     cmake --build --preset HOST-Debug --target HOST >/dev/null
     cp -f "${ROOT}/build/HOST-Debug/HOST" "${BIN_DIR}/${rq}.host"
     echo "    -> ${BIN_DIR}/${rq}.host"

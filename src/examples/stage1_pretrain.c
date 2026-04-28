@@ -82,6 +82,7 @@
 #include "TrainingLoopApi.h"
 
 #include "smatable_dataset.h"
+#include "MemProfile.h"
 #include "mem_probe.h"
 
 #define MAX_BLOCKS 8
@@ -245,12 +246,24 @@ static void buildSplit(dataset_t *dst, const smatable_dataset_t *ds, bool trainS
         memcpy(x->data, tmp, wf * sizeof(float));
         items->array[i] = x;
 
-        size_t *yd = reserveMemory(sizeof(size_t));
-        yd[0] = g_NC;
-        size_t *yo = reserveMemory(sizeof(size_t));
-        setOrderOfDimsForNewTensor(1, yo);
+        /* rank-2 [1, NC] (not rank-1 [NC]): must match the model's real
+         * softmax-output rank. reserveInferenceStats() (InferenceApi.c)
+         * sizes inferenceStats->output via getShapeLike(label->shape), then
+         * inferenceWithLoss() copyTensor()s the model's actual output shape
+         * into it (copyShape(), Tensor.c) -- a rank-1 label makes that dest
+         * one size_t short, so the copy overflows the allocation (fatal
+         * under ODT_MEM_PROFILE's exact-size allocator; silently absorbed
+         * into calloc() slack otherwise). Data layout is unaffected (still
+         * NC contiguous floats) and no consumer reads label->shape rank as
+         * a batch size (CE reads softmaxOutput's shape, not label's; see
+         * upstream F8). */
+        size_t *yd = reserveMemory(2 * sizeof(size_t));
+        yd[0] = 1;
+        yd[1] = g_NC;
+        size_t *yo = reserveMemory(2 * sizeof(size_t));
+        setOrderOfDimsForNewTensor(2, yo);
         shape_t *ys = reserveMemory(sizeof(shape_t));
-        setShape(ys, yd, 1, yo);
+        setShape(ys, yd, 2, yo);
         tensor_t *y = initTensor(ys, quantizationInitFloat(), NULL);
         ((float *)y->data)[(size_t)lab] = 1.0f;
         labels->array[i] = y;
@@ -388,11 +401,12 @@ static size_t countParams(void) {
 }
 
 /* ---- Layer A: exact model accounting (bytes; spec 2026-07-02-memory-time-probes) ----
- * NOTE: current build is STAGE1_USE_GROUPNORM=0 (LayerNorm substitute, see the
- * file-header comment) — this accounting walks g_params/calcOutputShape and is
- * norm-agnostic, so it runs unchanged, but the byte counts it produces are
- * plumbing-valid only, NOT the paper numbers (LayerNorm's [C,L] affine adds
- * params GroupNorm(1,C) wouldn't have). */
+ * Toggle-agnostic: this accounting walks the live g_params registry and
+ * replays calcOutputShape, so it is correct as-is for either norm build
+ * (STAGE1_USE_GROUPNORM 0 or 1, see the file-header comment) — GroupNorm(1,C)
+ * and the LayerNorm([C,L]) fallback register different param/grad tensor
+ * counts (per-channel vs per-element affine), and whichever is actually
+ * compiled in is what g_params holds when this runs. */
 typedef struct memBudget {
     size_t params, grads, optstate, act, gradbuf, io, masks, mcuTotal, datasetHost;
 } memBudget_t;
@@ -542,7 +556,7 @@ static void stateDictLoad(layer_t **model, size_t modelSize, const char *dir) {
     }
 }
 
-/* ---------- training entry point (run on the Layer-C painted stack) ---------- */
+/* ---------- training entry point (stack-measured via upstream MemProfile.h) ---------- */
 
 typedef struct trainCtx {
     layer_t **model;
@@ -562,15 +576,16 @@ typedef struct trainCtx {
 } trainCtx_t;
 
 /* Everything the epoch loop + best-epoch snapshot + ckpt/manifest write used
- * to do directly in main() now lives here so it can run on a dedicated,
- * paint-scannable stack (Layer C). ensureDir()/calloc() failures that used to
+ * to do directly in main() now lives here so it can run under upstream's
+ * measurePeakStackBytes (MemProfile.h), which measures it on a fresh,
+ * paint-scannable pthread stack. ensureDir()/calloc() failures that used to
  * `return 1;` from main() now exit(1) directly — exit() terminates the whole
  * process regardless of which thread calls it, so the abort semantics are
  * unchanged. k/dil/pDrop/nParams are re-derived here (env vars are
  * process-global; countParams() re-reads the already-built g_params
  * registry) rather than threaded through trainCtx_t, to keep the context
  * struct limited to what the epoch loop itself needs. */
-static void *trainMain(void *argp) {
+static void trainMain(void *argp) {
     trainCtx_t *ctx = (trainCtx_t *)argp;
 
     snapshotAlloc();
@@ -683,13 +698,13 @@ static void *trainMain(void *argp) {
 
     ctx->bestAcc = bestAcc;
     ctx->bestEpoch = bestEpoch;
-    return NULL;
 }
 
 /* ---------- main ---------- */
 
 int main(void) {
     init();
+    memProfileReset();
 
     char ts[32];
     iso8601_now(ts, sizeof(ts));
@@ -721,6 +736,10 @@ int main(void) {
     buildSplit(&g_train, ds, true);
     buildSplit(&g_test, ds, false);
     smatableDatasetClose(ds);
+    /* Heap live-bytes right after dataset materialization + close (baseline
+     * memProfileReset() at main() entry) — mirrored into RESULT/memory.json
+     * as mem_dataset_heap_b. 0 when built without -DODT_MEM_PROFILE. */
+    size_t heapDataset = memProfileMark();
 #if MEM_PROBE_AVAILABLE
     long rssAfterData = memProbeRssNowKb();
 #else
@@ -734,6 +753,7 @@ int main(void) {
     layerQuant_t lq;
     layerQuantInitUniform(&lq, quantizationInitFloat());
     layer_t *model[MAX_LAYERS];
+    size_t heapBeforeModel = memProfileMark();
     size_t modelSize = buildModel(model, &lq, widths, nBlocks, k, dil, pDrop);
     size_t nParams = countParams();
     printf("  model: layers=%zu param_layers=%zu n_params=%zu\n", modelSize, g_numParamLayers,
@@ -795,6 +815,7 @@ int main(void) {
 
     optimizer_t *sgd = sgdMCreateOptim(lr0, momentum, weightDecay, model, modelSize, FLOAT32,
                                        quantizationInitFloat());
+    size_t heapAfterOpt = memProfileMark();
     optimizerFunctions_t optimFns = optimizerFunctions[SGD_M];
 #if MEM_PROBE_AVAILABLE
     long rssAfterModel = memProbeRssNowKb();
@@ -850,8 +871,8 @@ int main(void) {
         return 0;
     }
 
-    /* ---- training (runs on trainMain, driven from a dedicated Layer-C
-     * painted stack when available) ---- */
+    /* ---- training (runs on trainMain, driven via upstream
+     * measurePeakStackBytes so its stack high-water mark can be measured) ---- */
     trainCtx_t ctx = {.model = model,
                       .modelSize = modelSize,
                       .sgd = sgd,
@@ -865,15 +886,11 @@ int main(void) {
                       .ckptDir = ckptDir,
                       .bestAcc = -1.0f,
                       .bestEpoch = 0};
-#if MEM_PROBE_AVAILABLE
-    long stackPeak = memProbeRunOnPaintedStack(trainMain, &ctx);
-    if (stackPeak < 0) {
-        trainMain(&ctx); /* fallback: run inline, report stack_peak_b=-1 */
-    }
-#else
-    long stackPeak = -1;
-    trainMain(&ctx);
-#endif
+    /* Upstream MemProfile.h (ODT main 3e768c7) replaces the old in-header
+     * painted-stack probe; it fails loud (exit 1) internally on any pthread
+     * error rather than falling back, so there is no -1 inline-fallback path
+     * to keep here. */
+    long stackPeak = (long)measurePeakStackBytes(trainMain, &ctx, (size_t)1 << 20);
 
     double cpuU, cpuS;
     long maxRssKb;
@@ -884,14 +901,34 @@ int main(void) {
     cpuS = 0.0;
     maxRssKb = -1;
 #endif
+
+    /* Heap-counter reconciliation (StorageApi.h memProfile*; active only when
+     * built with -DODT_MEM_PROFILE — the four mem_heap_peak_b/mem_dataset_
+     * heap_b/mem_model_heap_b/mem_reconciliation_gap_b keys below all read 0
+     * otherwise, never crash). mb.mcuTotal (computed above by
+     * computeMemBudget) is a 7-term STATIC accounting — params + grads +
+     * optstate + act + gradbuf + io + masks — a deliberately conservative
+     * superset of upstream har_classifier's 5-term figure. heapPeak is the
+     * MEASURED live-byte high-water mark across the whole process (dataset
+     * copies, DataLoader scratch, per-op transients, everything mcuTotal
+     * doesn't model). reconGap is recorded AS-IS, signed, and never tuned to
+     * close it: positive = heap bytes unaccounted for by the static budget;
+     * negative would mean the static budget over-counts something the heap
+     * never actually touched (e.g. a freed scratch buffer). */
+    size_t heapPeak = memProfilePeakBytes();
+    long reconGap = (long)heapPeak - (long)mb.mcuTotal;
+
     printf("RESULT accuracy=%.6f best_epoch=%d n_params=%zu wall_clock_s=%.3f "
            "mem_params_b=%zu mem_grads_b=%zu mem_optstate_b=%zu mem_act_b=%zu "
            "mem_gradbuf_b=%zu mem_io_b=%zu mem_masks_b=%zu mem_mcu_total_b=%zu "
            "mem_dataset_host_b=%zu rss_peak_kb=%ld rss_after_data_kb=%ld "
-           "rss_after_model_kb=%ld cpu_user_s=%.3f cpu_sys_s=%.3f stack_peak_b=%ld\n",
+           "rss_after_model_kb=%ld cpu_user_s=%.3f cpu_sys_s=%.3f stack_peak_b=%ld "
+           "mem_heap_peak_b=%zu mem_dataset_heap_b=%zu mem_model_heap_b=%zu "
+           "mem_reconciliation_gap_b=%ld\n",
            (double)ctx.bestAcc, ctx.bestEpoch, nParams, mono_s() - t0, mb.params, mb.grads,
            mb.optstate, mb.act, mb.gradbuf, mb.io, mb.masks, mb.mcuTotal, mb.datasetHost,
-           maxRssKb, rssAfterData, rssAfterModel, cpuU, cpuS, stackPeak);
+           maxRssKb, rssAfterData, rssAfterModel, cpuU, cpuS, stackPeak, heapPeak, heapDataset,
+           heapAfterOpt - heapBeforeModel, reconGap);
 
     /* Same probe keys as RESULT, mirrored to <ckpt>/memory.json; manifest.json
      * (written inside trainMain) is untouched. */
@@ -916,11 +953,16 @@ int main(void) {
                     "  \"rss_after_model_kb\": %ld,\n"
                     "  \"cpu_user_s\": %.6f,\n"
                     "  \"cpu_sys_s\": %.6f,\n"
-                    "  \"stack_peak_b\": %ld\n"
+                    "  \"stack_peak_b\": %ld,\n"
+                    "  \"mem_heap_peak_b\": %zu,\n"
+                    "  \"mem_dataset_heap_b\": %zu,\n"
+                    "  \"mem_model_heap_b\": %zu,\n"
+                    "  \"mem_reconciliation_gap_b\": %ld\n"
                     "}\n",
                     mb.params, mb.grads, mb.optstate, mb.act, mb.gradbuf, mb.io, mb.masks,
                     mb.mcuTotal, mb.datasetHost, maxRssKb, rssAfterData, rssAfterModel, cpuU,
-                    cpuS, stackPeak);
+                    cpuS, stackPeak, heapPeak, heapDataset, heapAfterOpt - heapBeforeModel,
+                    reconGap);
             fclose(mjf);
         }
     }

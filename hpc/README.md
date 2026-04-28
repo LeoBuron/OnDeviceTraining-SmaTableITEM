@@ -60,6 +60,8 @@ uv run tools/prep_smatable.py --src data/model_and_dataset/trial-4223/dataset --
 
 All outputs land in gitignored `data/smatable-trial-<id>/` directories with bytewise-canonical `smatable_x.npy [8999,4,T]` and `smatable_y.npy` plus fold indices for LOSO (15 subjects, ~8399 train / ~600 test per fold) and AOS (15 sessions, ~8459 train / ~540 test per fold). The `--no-baked` flag ensures no MCU header files are generated (stage 2 integrates baked backends for RP2350 runs).
 
+`stage1_pretrain`'s RESULT line carries 23 keys total: the 19 base keys (accuracy/params/wall-clock, the 7-term static `mem_*_b` budget — params+grads+optstate+act+gradbuf+io+masks — plus RSS/CPU milestones and `stack_peak_b`, measured via upstream `measurePeakStackBytes`), and 4 heap-counter keys (`mem_heap_peak_b`, `mem_dataset_heap_b`, `mem_model_heap_b`, `mem_reconciliation_gap_b`) gated by the `ODT_MEM_PROFILE` CMake flag — all four print 0 on a binary built without it. `hpc/build_all_rqs.sh` now passes `-DODT_MEM_PROFILE=ON` by default. `mem_mcu_total_b` (static budget) plus `stack_peak_b` (measured) against the RP2350's 520 KB SRAM is the on-device feasibility figure.
+
 ## On Amplitude
 
 ```bash
