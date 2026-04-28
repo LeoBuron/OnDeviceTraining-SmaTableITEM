@@ -889,8 +889,11 @@ int main(void) {
     /* Upstream MemProfile.h (ODT main 3e768c7) replaces the old in-header
      * painted-stack probe; it fails loud (exit 1) internally on any pthread
      * error rather than falling back, so there is no -1 inline-fallback path
-     * to keep here. */
-    long stackPeak = (long)measurePeakStackBytes(trainMain, &ctx, (size_t)1 << 20);
+     * to keep here. Probe size is env-tunable: trial-3408-class geometries
+     * (wide widths x large T) may exceed the 1 MiB default because upstream
+     * executeOp keeps VLA scratch ~ 3*maxElems*4B on the stack. */
+    size_t stackProbeBytes = (size_t)env_int("ODT_STACK_PROBE_BYTES", 1 << 20);
+    long stackPeak = (long)measurePeakStackBytes(trainMain, &ctx, stackProbeBytes);
 
     double cpuU, cpuS;
     long maxRssKb;
