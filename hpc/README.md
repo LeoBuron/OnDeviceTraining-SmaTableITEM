@@ -40,6 +40,26 @@ uv run hpc/run_optuna.py \
     --n-workers 4
 ```
 
+## Stage-1 datasets
+
+The four stage-1 trial datasets are prepared from preprocessed gesture-windows stored under `data/model_and_dataset/trial-{2353,3408,3650,4223}/dataset/`. Each run generates 8999 canonical samples (4-channel, variable-length windows) with 15-fold LOSO and AOS fold splits:
+
+```bash
+uv run tools/prep_smatable.py --src data/model_and_dataset/trial-2353/dataset --dst data/smatable-trial-2353 --schemes LOSO,AOS --no-baked
+uv run tools/prep_smatable.py --src data/model_and_dataset/trial-3408/dataset --dst data/smatable-trial-3408 --schemes LOSO,AOS --no-baked
+uv run tools/prep_smatable.py --src data/model_and_dataset/trial-3650/dataset --dst data/smatable-trial-3650 --schemes LOSO,AOS --no-baked
+uv run tools/prep_smatable.py --src data/model_and_dataset/trial-4223/dataset --dst data/smatable-trial-4223 --schemes LOSO,AOS --no-baked
+```
+
+| Trial | T (window samples) | n_events | n_classes |
+|---|---|---|---|
+| 2353 | 1250 | 8999 | 6 |
+| 3408 | 1250 | 8999 | 6 |
+| 3650 | 250 | 8999 | 6 |
+| 4223 | 625 | 8999 | 6 |
+
+All outputs land in gitignored `data/smatable-trial-<id>/` directories with bytewise-canonical `smatable_x.npy [8999,4,T]` and `smatable_y.npy` plus fold indices for LOSO (15 subjects, ~8399 train / ~600 test per fold) and AOS (15 sessions, ~8459 train / ~540 test per fold). The `--no-baked` flag ensures no MCU header files are generated (stage 2 integrates baked backends for RP2350 runs).
+
 ## On Amplitude
 
 ```bash
