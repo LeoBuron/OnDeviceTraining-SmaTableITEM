@@ -23,12 +23,13 @@
 
 #define SOURCE_FILE "stage1_pretrain"
 
-/* GroupNorm(1,C) is the reference norm; until the feat/groupnorm ODT branch
- * lands, STAGE1_USE_GROUPNORM=0 substitutes LayerNorm([C, L]) — identical
+/* GroupNorm(1,C) is the reference norm; GroupNorm landed upstream main
+ * 3e768c7, so it is now the default. STAGE1_USE_GROUPNORM=0 keeps the
+ * LayerNorm([C, L]) fallback available for A/B work — identical
  * normalization statistics, per-element affine instead of per-channel.
  * Plumbing-equivalent; NOT the paper configuration (extra affine params). */
 #ifndef STAGE1_USE_GROUPNORM
-#define STAGE1_USE_GROUPNORM 0
+#define STAGE1_USE_GROUPNORM 1
 #endif
 
 #include <errno.h>
@@ -348,7 +349,7 @@ static size_t buildModel(layer_t **model, layerQuant_t *lq, const size_t *widths
             setShape(ms, md, 1, mo);
             tensor_t *mask = initTensor(ms, quantizationInitBool(), NULL);
             g_maskBytes += (nMask + 7) / 8;
-            model[m++] = dropoutLayerInit(pDrop, mask, lq->forwardMath, lq->backwardMath);
+            model[m++] = dropoutLayerInit(pDrop, mask, lq->outputQ, lq->propLossQ);
         }
         prevC = w;
     }
@@ -367,7 +368,7 @@ static size_t buildModel(layer_t **model, layerQuant_t *lq, const size_t *widths
         setShape(ms, md, 1, mo);
         tensor_t *mask = initTensor(ms, quantizationInitBool(), NULL);
         g_maskBytes += (16 + 7) / 8;
-        model[m++] = dropoutLayerInit(pDrop, mask, lq->forwardMath, lq->backwardMath);
+        model[m++] = dropoutLayerInit(pDrop, mask, lq->outputQ, lq->propLossQ);
     }
     model[m++] = linearLayerInit(&(linearInit_t){.inFeatures = 16, .outFeatures = g_NC}, lq);
     regParam("head.5", model[m - 1]->config->linear->weights, model[m - 1]->config->linear->bias);
@@ -450,64 +451,6 @@ static memBudget_t computeMemBudget(layer_t **model, size_t modelSize) {
     b.datasetHost = (getTrainSize() + getTestSize()) *
                     (g_C * g_T * sizeof(float) + g_NC * sizeof(float));
     return b;
-}
-
-/* ---------- optimizer (SGD-M, bias-safe) ----------
- *
- * NOT calling upstream sgdMCreateOptim() here — it NULL-derefs on this
- * model. SgdApi.c's CONV1D case does:
- *
- *   parameter_t *cBias = conv1dCfg->bias;
- *   ...
- *   tensor_t *cBiasStateBuffer = getTensorLike(cBias->param);
- *
- * unconditionally (no NULL check), and Optimizer.c's
- * calcNumberOfStatesByLayerType() unconditionally counts 2 states for every
- * CONV1D layer. Both assume every Conv1d has a bias. Our depthwise/pointwise
- * convs are BIAS_FALSE by design (architecture docstring: "no bias" x2), so
- * conv1dConfig->bias is NULL and sgdMCreateOptim segfaults on this model.
- * Root cause is upstream (a3bf34c, OnDeviceTraining/src/); patching it is
- * out of scope here, so this builds the identical optimizer_t / sgd_t /
- * states_t layout sgdMCreateOptim would produce (same struct shapes
- * sgdStepMFloat / sgdZeroGrad / scaleOptimizerGradients / trainingEpochDefault
- * all read), but sourced from g_params[] — which already knows, per layer,
- * whether a real bias parameter exists — instead of dispatching on
- * layerType_t and assuming one. */
-static optimizer_t *buildSgdM(float lr, float momentumFactor, float weightDecay) {
-    optimizer_t *optim = reserveMemory(sizeof(optimizer_t));
-    optim->type = SGD_M;
-    optim->qtype = FLOAT32;
-
-    optimImpl_t *impl = reserveMemory(sizeof(optimImpl_t));
-    sgd_t *sgd = reserveMemory(sizeof(sgd_t));
-    sgdInit(sgd, lr, momentumFactor, weightDecay);
-    impl->sgd = sgd;
-    optim->impl = impl;
-
-    size_t sizeStates = 0;
-    for (size_t i = 0; i < g_numParamLayers; i++) {
-        sizeStates += g_params[i].b != NULL ? 2 : 1;
-    }
-    optim->sizeStates = sizeStates;
-    optim->parameter = reserveMemory(sizeStates * sizeof(parameter_t *));
-    optim->states = reserveMemory(sizeStates * sizeof(states_t *));
-
-    size_t slot = 0;
-    for (size_t i = 0; i < g_numParamLayers; i++) {
-        parameter_t *entries[2] = {g_params[i].w, g_params[i].b};
-        size_t n = g_params[i].b != NULL ? 2 : 1;
-        for (size_t j = 0; j < n; j++) {
-            parameter_t *p = entries[j];
-            optim->parameter[slot] = p;
-            states_t *st = reserveMemory(sizeof(states_t));
-            st->statesPerParameter = 1;
-            st->stateBuffers = reserveMemory(sizeof(tensor_t *));
-            st->stateBuffers[0] = getTensorLike(p->param);
-            optim->states[slot] = st;
-            slot++;
-        }
-    }
-    return optim;
 }
 
 /* ---------- best-epoch snapshot ---------- */
@@ -850,7 +793,8 @@ int main(void) {
         return 0;
     }
 
-    optimizer_t *sgd = buildSgdM(lr0, momentum, weightDecay);
+    optimizer_t *sgd = sgdMCreateOptim(lr0, momentum, weightDecay, model, modelSize, FLOAT32,
+                                       quantizationInitFloat());
     optimizerFunctions_t optimFns = optimizerFunctions[SGD_M];
 #if MEM_PROBE_AVAILABLE
     long rssAfterModel = memProbeRssNowKb();

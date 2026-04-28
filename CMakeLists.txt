@@ -35,7 +35,8 @@ if(${ODT_PREPARE})
     FetchContent_Declare(
             odt
             GIT_REPOSITORY https://github.com/es-ude/OnDeviceTraining
-            GIT_TAG develop
+            # pinned: upstream main with GroupNorm + bias-less-conv optimizer fix
+            GIT_TAG 3e768c7
     )
 
 
@@ -55,7 +56,8 @@ if(${ODT_PREPARE})
             odt
             QUIET
             GIT_REPOSITORY https://github.com/es-ude/OnDeviceTraining
-            GIT_TAG "develop"
+            # pinned: upstream main with GroupNorm + bias-less-conv optimizer fix
+            GIT_TAG "3e768c7"
             GIT_SUBMODULES_RECURSE FALSE
 
             SOURCE_DIR ${CMAKE_SOURCE_DIR}/OnDeviceTraining/src
@@ -74,6 +76,11 @@ set(ODT_LIBS
     Common Rounding RNG
     # layers
     Layer Linear LinearApi Relu ReluApi Softmax SoftmaxApi
+    Conv1d Conv1dApi Conv1dTransposed MaxPool1d AvgPool1d AdaptiveAvgPool1d
+    Pool1dApi AdaptivePool1dApi Dropout DropoutApi Flatten FlattenApi
+    LayerNorm LayerNormApi QuantizationLayer
+    LayerQuant StateDictApi
+    GroupNorm GroupNormApi
     # loss functions
     LossFunction MSE CrossEntropy
     # optimizer
@@ -82,6 +89,8 @@ set(ODT_LIBS
     InferenceApi TrainingLoopApi TrainingBatchDefault TrainingEpochDefault CalculateGradsSequential
     # storage + dataloader
     StorageApi DataLoader DataLoaderApi
+    # arithmetic / misc (needed by GroupNorm + LayerConfigAccess pulled in at 3e768c7)
+    ArithmeticType ExecuteOp Reduce LayerConfigAccess MemProfile
 )
 
 set(ODT_LIBS_HOST_EXTRA NPYLoader NPYLoaderApi CSVHelper)

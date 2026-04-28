@@ -7,19 +7,30 @@
  * > 0.9 accuracy in a few epochs because the per-class signal in channel 0
  * is linearly separable after flatten.
  *
- * Why Linear-only and not the real Conv1d/LayerNorm architecture: upstream
- * ODT does not yet ship Conv1d (the .a is empty) and has no LayerNorm at
- * all. Sprint plan W1 D3-D5 fills those gaps. Until then this example
- * proves the *harness* works — dataset prep -> NPY/baked backends ->
- * per-trial env-driven config -> Optuna parse -> result. The architecture
- * gets swapped in once Conv1d lands; the harness stays.
+ * Why Linear-only: the upstream architecture gap is closed as of 3e768c7
+ * /main (Conv1d, LayerNorm, GroupNorm, pooling and Dropout all shipped), but
+ * this toy stays Linear-only on purpose — it is the harness smoke example,
+ * proving dataset prep -> NPY/baked backends -> per-trial env-driven config
+ * -> Optuna parse -> result. The real Conv1d/GroupNorm architecture lives in
+ * the per-RQ examples; the harness stays.
  *
- * Why a manual training loop and not trainingRun(): upstream bug F2
- * (DataLoader indices[] under-initialized) silently caps per-epoch unique
- * samples to ~3% of the dataset. Bypassed entirely here by walking the
- * training split sample-by-sample. Combined with batch size = 1, this also
- * neuters bug F1 (CE-grad missing batch-size normalization, since
- * batch_size=1 -> factor of 1).
+ * Model construction uses the modern layerQuant_t + linearLayerInit /
+ * reluLayerInit / softmaxLayerInit factory idiom (INIT_XAVIER_UNIFORM weight
+ * init via linearInit_t.weightInit) — the pre-3e768c7 manual-tensor /
+ * *Legacy-factory model block is gone; the Legacy shims (linearLayerInitLegacy
+ * et al.) it depended on no longer exist upstream. Factory bias init is
+ * uniform(+/-1/sqrt(fanIn)) per PyTorch parity (was zero under the old
+ * manual-tensor block) — immaterial for this smoke test.
+ *
+ * Why a manual training loop and not trainingRun(): simplicity and
+ * visibility — walking the training split sample-by-sample keeps the
+ * stdout contract and per-epoch stats trivially auditable. Historical
+ * note: this loop originally also worked around upstream bugs F1 (CE-grad
+ * missing batch-size normalization) and F2 (DataLoader indices[]
+ * under-initialized); both are FIXED as of 3e768c7/main (mean-scaling is
+ * applied in the training loop via computeMeanScale*, and DataLoader fills
+ * indices[] for the full dataset), so the loop is a style choice now, not
+ * a bug workaround.
  *
  * Stdout contract (read by hpc/run_optuna.py):
  *   BEGIN  rq0_toy_synthetic <iso8601>
@@ -49,6 +60,8 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "Layer.h"
+#include "LayerCommon.h"
+#include "LayerQuant.h"
 #include "Linear.h"
 #include "LinearApi.h"
 #include "ReluApi.h"
@@ -60,6 +73,7 @@
 #include "CalculateGradsSequential.h"
 #include "LossFunction.h"
 #include "RNG.h"
+#include "StorageApi.h"
 
 #include "smatable_dataset.h"
 
@@ -123,72 +137,88 @@ int main(void) {
 
     quantization_t *q = quantizationInitFloat();
 
-    /* Layer 0: Linear (WF -> hidden). Weights via Xavier-uniform; bias zero. */
-    float *w0_data = calloc((size_t)hidden * WF, sizeof(float));
-    float *w0_grad = calloc((size_t)hidden * WF, sizeof(float));
-    size_t w0_dims[] = { (size_t)hidden, WF };
-    tensor_t *w0_p = tensorInitWithDistribution(XAVIER_UNIFORM, w0_data, w0_dims, 2, q, NULL, WF, (size_t)hidden);
-    tensor_t *w0_g = tensorInitFloat(w0_grad, w0_dims, 2, NULL);
-    parameter_t *w0_pm = parameterInit(w0_p, w0_g);
-
-    float *b0_data = calloc((size_t)hidden, sizeof(float));
-    float *b0_grad = calloc((size_t)hidden, sizeof(float));
-    size_t b0_dims[] = { 1, (size_t)hidden };
-    tensor_t *b0_p = tensorInitFloat(b0_data, b0_dims, 2, NULL);
-    tensor_t *b0_g = tensorInitFloat(b0_grad, b0_dims, 2, NULL);
-    parameter_t *b0_pm = parameterInit(b0_p, b0_g);
-
-    /* Layer 2: Linear (hidden -> NC). */
-    float *w1_data = calloc((size_t)hidden * NC, sizeof(float));
-    float *w1_grad = calloc((size_t)hidden * NC, sizeof(float));
-    size_t w1_dims[] = { NC, (size_t)hidden };
-    tensor_t *w1_p = tensorInitWithDistribution(XAVIER_UNIFORM, w1_data, w1_dims, 2, q, NULL, (size_t)hidden, NC);
-    tensor_t *w1_g = tensorInitFloat(w1_grad, w1_dims, 2, NULL);
-    parameter_t *w1_pm = parameterInit(w1_p, w1_g);
-
-    float *b1_data = calloc(NC, sizeof(float));
-    float *b1_grad = calloc(NC, sizeof(float));
-    size_t b1_dims[] = { 1, NC };
-    tensor_t *b1_p = tensorInitFloat(b1_data, b1_dims, 2, NULL);
-    tensor_t *b1_g = tensorInitFloat(b1_grad, b1_dims, 2, NULL);
-    parameter_t *b1_pm = parameterInit(b1_p, b1_g);
-
+    /* Model: Linear(WF->hidden) -> ReLU -> Linear(hidden->NC) -> Softmax,
+     * built via the modern layerQuant_t + linearLayerInit/reluLayerInit/
+     * softmaxLayerInit factory idiom (the pre-3e768c7 manual-tensor /
+     * *Legacy-factory block is gone — see file docstring). Factory bias
+     * init is uniform(+/-1/sqrt(fanIn)) per PyTorch parity (was zero under
+     * the old manual-tensor block) — immaterial for this smoke test. */
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
     layer_t *model[MODEL_SIZE];
-    model[0] = linearLayerInit(w0_pm, b0_pm, q, q, q, q);
-    model[1] = reluLayerInit(q, q);
-    model[2] = linearLayerInit(w1_pm, b1_pm, q, q, q, q);
-    model[3] = softmaxLayerInit(q, q);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = WF,
+                        .outFeatures = (size_t)hidden,
+                        .bias = BIAS_TRUE,
+                        .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f}},
+        &lq);
+    model[1] = reluLayerInit(&lq);
+    model[2] = linearLayerInit(
+        &(linearInit_t){.inFeatures = (size_t)hidden,
+                        .outFeatures = NC,
+                        .bias = BIAS_TRUE,
+                        .weightInit = {.scheme = INIT_XAVIER_UNIFORM, .gain = 1.0f}},
+        &lq);
+    model[3] = softmaxLayerInit(&lq);
 
-    optimizer_t *sgd = sgdMCreateOptim(lr, 0.f, 0.f, model, MODEL_SIZE, FLOAT32);
+    optimizer_t *sgd =
+        sgdMCreateOptim(lr, 0.f, 0.f, model, MODEL_SIZE, FLOAT32, quantizationInitFloat());
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
 
     size_t n_params = (size_t)hidden * WF + (size_t)hidden + (size_t)hidden * NC + NC;
 
-    /* Reusable input + label tensors. Shape [1, WF] flattened input,
-     * [1, NC] one-hot label. */
-    float *x_buf = calloc(WF, sizeof(float));
-    size_t x_dims[] = { 1, WF };
-    tensor_t *x_t = tensorInitFloat(x_buf, x_dims, 2, NULL);
+    /* Reusable input + label tensors. Shape [1, WF] flattened input, [1, NC]
+     * one-hot label. tensorInitFloat is gone upstream; build with
+     * initTensor(shape, quantizationInitFloat(), NULL), which owns its own
+     * zeroed buffer, and write per-sample data directly into x_t->data /
+     * y_t->data (dims/order/shape allocation pattern mirrors
+     * stage1_pretrain.c's buildSplit — the shape_t must outlive the tensor,
+     * so it and its dims/order arrays are heap-allocated via reserveMemory,
+     * not stack locals that would go out of scope). */
+    size_t *xDims = reserveMemory(2 * sizeof(size_t));
+    xDims[0] = 1;
+    xDims[1] = WF;
+    size_t *xOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, xOrder);
+    shape_t *xShape = reserveMemory(sizeof(shape_t));
+    setShape(xShape, xDims, 2, xOrder);
+    tensor_t *x_t = initTensor(xShape, quantizationInitFloat(), NULL);
 
-    float *y_buf = calloc(NC, sizeof(float));
-    size_t y_dims[] = { 1, NC };
-    tensor_t *y_t = tensorInitFloat(y_buf, y_dims, 2, NULL);
+    size_t *yDims = reserveMemory(2 * sizeof(size_t));
+    yDims[0] = 1;
+    yDims[1] = NC;
+    size_t *yOrder = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, yOrder);
+    shape_t *yShape = reserveMemory(sizeof(shape_t));
+    setShape(yShape, yDims, 2, yOrder);
+    tensor_t *y_t = initTensor(yShape, quantizationInitFloat(), NULL);
+
+    /* Scratch buffer smatableDatasetGetTrain/GetTest write into; memcpy'd
+     * into x_t->data per sample (x_t->data is ODT-owned, not a caller
+     * buffer the dataset API can fill directly). */
+    float *tmp = calloc(WF, sizeof(float));
 
     clock_t t0 = clock();
     float best_acc = 0.f;
     int best_epoch = 0;
+
+    /* forwardReduction is a per-call parameter, not a config field. Loop
+     * rationale: see top-of-file docstring. */
+    lossConfig_t lossConfig = {
+        .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
 
     for (int e = 0; e < n_epoch; e++) {
         float epoch_loss = 0.f;
         size_t epoch_correct = 0;
         for (size_t i = 0; i < N_TRAIN; i++) {
             int32_t label;
-            smatableDatasetGetTrain(ds, i, x_buf, &label);
-            memset(y_buf, 0, NC * sizeof(float));
-            y_buf[(size_t)label] = 1.f;
+            smatableDatasetGetTrain(ds, i, tmp, &label);
+            memcpy(x_t->data, tmp, WF * sizeof(float));
+            memset(y_t->data, 0, NC * sizeof(float));
+            ((float *)y_t->data)[(size_t)label] = 1.f;
 
             trainingStats_t *stats = calculateGradsSequential(
-                model, MODEL_SIZE, CROSS_ENTROPY, x_t, y_t);
+                model, MODEL_SIZE, lossConfig, REDUCTION_MEAN, x_t, y_t);
 
             tensor_t *out = inference(model, MODEL_SIZE, x_t);
             int32_t pred = argmax(out);
@@ -207,7 +237,8 @@ int main(void) {
         size_t val_correct = 0;
         for (size_t i = 0; i < N_TEST; i++) {
             int32_t label;
-            smatableDatasetGetTest(ds, i, x_buf, &label);
+            smatableDatasetGetTest(ds, i, tmp, &label);
+            memcpy(x_t->data, tmp, WF * sizeof(float));
             tensor_t *out = inference(model, MODEL_SIZE, x_t);
             if (argmax(out) == label) val_correct++;
             val_loss += ce_one(out, label);
