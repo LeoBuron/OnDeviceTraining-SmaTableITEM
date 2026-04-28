@@ -1,0 +1,14 @@
+{
+  "fold": [0, 1],
+  "lr": [0.1],
+  "momentum": [0.9],
+  "weight_decay": [0.0],
+  "epochs": [5],
+  "batch_size": [128],
+  "seed": [42],
+  "lr_schedule": ["cosine"],
+  "widths": ["8,8"],
+  "kernel_size": [5],
+  "dilation": [2],
+  "p_drop": [0.0]
+}

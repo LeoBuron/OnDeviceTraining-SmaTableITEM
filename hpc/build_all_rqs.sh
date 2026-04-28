@@ -19,7 +19,7 @@ mkdir -p "${BIN_DIR}"
 
 RQS=("$@")
 if [ ${#RQS[@]} -eq 0 ]; then
-    RQS=(rq0_toy_synthetic rq1_replay_buffer rq2_unseen_user rq3_new_gesture rq4_stability rq5_noise_augmentation)
+    RQS=(rq0_toy_synthetic rq1_replay_buffer rq2_unseen_user rq3_new_gesture rq4_stability rq5_noise_augmentation stage1_pretrain)
 fi
 
 # pico-sdk + ODT must already be fetched. Run PREPARE if not.

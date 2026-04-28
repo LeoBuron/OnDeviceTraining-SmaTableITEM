@@ -99,6 +99,7 @@ def make_objective(*, host_bin: Path, data_dir: Path, fold_scheme: str,
 
         trial_dir = log_dir / f"trial_{trial.number:05d}"
         trial_dir.mkdir(parents=True, exist_ok=True)
+        env["ODT_CKPT_DIR"] = str(trial_dir / "ckpt")
         (trial_dir / "env.json").write_text(json.dumps(
             {k: v for k, v in env.items() if k.startswith(("ODT_", "SMATABLE_"))},
             indent=2,
@@ -133,9 +134,9 @@ def make_objective(*, host_bin: Path, data_dir: Path, fold_scheme: str,
         if "skipped" in result:
             raise optuna.TrialPruned(f"binary skipped: {result.get('reason', '')}")
 
-        for k in ("n_params", "best_epoch", "wall_clock_s"):
-            if k in result:
-                trial.set_user_attr(k, result[k])
+        for k, v in result.items():
+            if k != "accuracy":
+                trial.set_user_attr(k, v)
         return float(result["accuracy"])
 
     return objective
@@ -281,24 +282,23 @@ def main() -> int:
     # dump CSV of completed trials
     completed = study.get_trials(deepcopy=False)
     csv_path = run_dir / "trials.csv"
+    attr_keys = sorted({k for t in completed for k in t.user_attrs})
     with csv_path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "trial", "state", "value",
-            *list(search_space),
-            "n_params", "best_epoch", "wall_clock_s",
-        ])
+        writer.writerow(["trial", "state", "value", *list(search_space), *attr_keys])
         for t in completed:
             row = [t.number, t.state.name, t.value]
             row.extend(t.params.get(k, "") for k in search_space)
-            row.extend([t.user_attrs.get("n_params", ""),
-                        t.user_attrs.get("best_epoch", ""),
-                        t.user_attrs.get("wall_clock_s", "")])
+            row.extend(t.user_attrs.get(k, "") for k in attr_keys)
             writer.writerow(row)
     print(f"trials.csv: {csv_path}  ({len(completed)} trials)")
-    if study.best_trial is not None:
+    try:
         bt = study.best_trial
         print(f"best: trial #{bt.number} value={bt.value:.4f} params={bt.params}")
+    except ValueError:
+        # optuna raises (rather than returning None) when zero trials are
+        # COMPLETE — e.g. every trial got PRUNED.
+        print("no completed trials — best_trial unavailable")
     return 0
 
 
