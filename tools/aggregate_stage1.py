@@ -3,6 +3,12 @@ combo (over folds), compare against the Adam reference, select the winner.
 
 Usage: uv run tools/aggregate_stage1.py --run-dir runs/optuna-local/stage1_smoke--<ts> \
            --config-name trial-3650 --expect-folds 2 --out stage1_selection.json
+
+--run-dir accepts multiple directories: a base study plus extension studies
+over complementary sub-grids (e.g. stage1_trial3408 wd=0.0 + the
+stage1_trial3408_ext_wd wd=0.0001 complement) merge into one selection.
+All studies must share the same search-space KEY SET (values may differ);
+`run_dir` in the output JSON is always a list.
 """
 import argparse
 import csv
@@ -16,16 +22,16 @@ REFERENCE = Path("data/model_and_dataset/summary.csv")
 FOLD_KEY = "fold"
 
 
-def resolve_search_space(explicit: Path | None, run_dir: Path) -> Path:
+def resolve_search_space(explicit: Path | None, run_dirs: list[Path]) -> Path:
     """Explicit --search-space wins; else fall back to the copy run_optuna.py
-    drops into the run dir. Exit 2 (not an exception) if neither exists —
+    drops into the FIRST run dir. Exit 2 (not an exception) if neither exists —
     this is a usage error, not a bug in the run."""
     if explicit is not None:
         if not explicit.exists():
             print(f"--search-space not found: {explicit}", file=sys.stderr)
             raise SystemExit(2)
         return explicit
-    fallback = run_dir / "search_space.json"
+    fallback = run_dirs[0] / "search_space.json"
     if fallback.exists():
         return fallback
     print(
@@ -36,9 +42,27 @@ def resolve_search_space(explicit: Path | None, run_dir: Path) -> Path:
     raise SystemExit(2)
 
 
+def check_key_sets(space_keys: list[str], run_dirs: list[Path]) -> None:
+    """Merging studies whose grids differ in KEYS (not values) would silently
+    fragment combos — refuse. Extension studies vary values only."""
+    expected = set(space_keys) | {FOLD_KEY}
+    for rd in run_dirs:
+        copy = rd / "search_space.json"
+        if not copy.exists():
+            continue
+        got = set(json.loads(copy.read_text()))
+        if got != expected:
+            print(f"search-space key set of {copy} {sorted(got)} does not match "
+                  f"the resolved key set {sorted(expected)} — refusing to merge",
+                  file=sys.stderr)
+            raise SystemExit(2)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--run-dir", type=Path, required=True)
+    p.add_argument("--run-dir", type=Path, required=True, nargs="+",
+                   help="one or more Optuna run dirs; extras are extension "
+                        "studies over complementary sub-grids, merged in")
     p.add_argument("--config-name", required=True, help="e.g. trial-4223 (reference lookup)")
     p.add_argument("--expect-folds", type=int, default=15)
     p.add_argument("--search-space", type=Path, default=None,
@@ -49,9 +73,16 @@ def main() -> int:
 
     search_space_path = resolve_search_space(args.search_space, args.run_dir)
     space_keys = [k for k in json.loads(search_space_path.read_text()) if k != FOLD_KEY]
+    check_key_sets(space_keys, args.run_dir)
 
-    rows = list(csv.DictReader((args.run_dir / "trials.csv").open()))
-    rows.sort(key=lambda r: int(r["trial"]))
+    rows = []
+    for di, rd in enumerate(args.run_dir):
+        for r in csv.DictReader((rd / "trials.csv").open()):
+            r["_run_dir"] = rd
+            r["_dir_index"] = di
+            rows.append(r)
+    # CLI order then trial number: dedup keeps the earliest study's row.
+    rows.sort(key=lambda r: (r["_dir_index"], int(r["trial"])))
     combos = defaultdict(list)
     for r in rows:
         if r["state"] != "COMPLETE":
@@ -72,8 +103,9 @@ def main() -> int:
         for r in rs:
             fold = r[FOLD_KEY]
             if fold in by_fold:
-                print(f"duplicate trial {r['trial']} for fold {fold} ignored "
-                      f"(GridSampler distributed re-run)", file=sys.stderr)
+                print(f"duplicate trial {r['trial']} ({r['_run_dir']}) for fold "
+                      f"{fold} ignored (GridSampler distributed re-run or "
+                      f"cross-study overlap)", file=sys.stderr)
                 continue
             by_fold[fold] = r
         deduped = list(by_fold.values())
@@ -89,7 +121,7 @@ def main() -> int:
             "min_acc": min(accs),
             "folds": sorted(
                 ({"fold": int(r[FOLD_KEY]), "accuracy": float(r["value"]),
-                  "ckpt": str(args.run_dir / f"trial_{int(r['trial']):05d}" / "ckpt")}
+                  "ckpt": str(r["_run_dir"] / f"trial_{int(r['trial']):05d}" / "ckpt")}
                  for r in deduped), key=lambda d: d["fold"]),
         }
         report.append(entry)
@@ -111,7 +143,8 @@ def main() -> int:
 
     args.out.write_text(json.dumps(
         {"config_name": args.config_name, "reference_mean": ref_mean,
-         "run_dir": str(args.run_dir), "best": best, "all_combos": report}, indent=2))
+         "run_dir": [str(d) for d in args.run_dir], "best": best,
+         "all_combos": report}, indent=2))
     print(f"selection -> {args.out}")
     return 0
 

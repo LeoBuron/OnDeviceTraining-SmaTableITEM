@@ -60,6 +60,20 @@ uv run tools/prep_smatable.py --src data/model_and_dataset/trial-4223/dataset --
 
 All outputs land in gitignored `data/smatable-trial-<id>/` directories with bytewise-canonical `smatable_x.npy [8999,4,T]` and `smatable_y.npy` plus fold indices for LOSO (15 subjects, ~8399 train / ~600 test per fold) and AOS (15 sessions, ~8459 train / ~540 test per fold). The `--no-baked` flag ensures no MCU header files are generated (stage 2 integrates baked backends for RP2350 runs).
 
+### Trial-3408: reduced grid + optional extension
+
+Trial-3408 does not fit the RP2350 (measured 1953 KiB vs 520 KB SRAM) and costs ~17.5 h per 250-epoch trial, so its base study runs a **reduced grid**: `stage1_trial3408.json` fixes `weight_decay=0.0` (75 trials instead of 150). Its trials also need a larger per-trial timeout: `TRIAL_TIMEOUT_S=72000` (the 14400 s used for the other configs kills every 3408 trial).
+
+If compute allows, extend to the full protocol by running the **complement grid** `stage1_trial3408_ext_wd.json` (`weight_decay=0.0001`, the exact 75 missing combos) as a second study — never widen the grid of an existing study: `GridSampler` identifies cells by index within the serialized search space, so a changed space re-runs everything. Aggregate both studies as one by passing multiple run dirs:
+
+```bash
+uv run tools/aggregate_stage1.py --run-dir runs/optuna-amplitude/stage1_trial3408--<ts> runs/optuna-amplitude/stage1_trial3408_ext_wd--<ts> --config-name trial-3408 --out stage1_selection_3408.json
+```
+
+The aggregator refuses to merge studies whose search-space *key sets* differ (values may differ — that is the point of an extension).
+
+### RESULT keys
+
 `stage1_pretrain`'s RESULT line carries 23 keys total: the 19 base keys (accuracy/params/wall-clock, the 7-term static `mem_*_b` budget — params+grads+optstate+act+gradbuf+io+masks — plus RSS/CPU milestones and `stack_peak_b`, measured via upstream `measurePeakStackBytes`), and 4 heap-counter keys (`mem_heap_peak_b`, `mem_dataset_heap_b`, `mem_model_heap_b`, `mem_reconciliation_gap_b`) gated by the `ODT_MEM_PROFILE` CMake flag — all four print 0 on a binary built without it. `hpc/build_all_rqs.sh` now passes `-DODT_MEM_PROFILE=ON` by default. `mem_mcu_total_b` (static budget) plus `stack_peak_b` (measured) against the RP2350's 520 KB SRAM is the on-device feasibility figure.
 
 ## On Amplitude
