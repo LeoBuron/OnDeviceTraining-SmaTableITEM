@@ -81,6 +81,7 @@
 #include "TrainingLoopApi.h"
 
 #include "smatable_dataset.h"
+#include "mem_probe.h"
 
 #define MAX_BLOCKS 8
 #define MAX_LAYERS 64
@@ -273,6 +274,7 @@ typedef struct paramLayer {
 
 static paramLayer_t g_params[MAX_PARAM_LAYERS];
 static size_t g_numParamLayers = 0;
+static size_t g_maskBytes = 0; /* bit-packed BOOL dropout masks, accumulated in buildModel */
 
 static void regParam(const char *base, parameter_t *w, parameter_t *b) {
     if (g_numParamLayers >= MAX_PARAM_LAYERS) {
@@ -345,6 +347,7 @@ static size_t buildModel(layer_t **model, layerQuant_t *lq, const size_t *widths
             shape_t *ms = reserveMemory(sizeof(shape_t));
             setShape(ms, md, 1, mo);
             tensor_t *mask = initTensor(ms, quantizationInitBool(), NULL);
+            g_maskBytes += (nMask + 7) / 8;
             model[m++] = dropoutLayerInit(pDrop, mask, lq->forwardMath, lq->backwardMath);
         }
         prevC = w;
@@ -363,6 +366,7 @@ static size_t buildModel(layer_t **model, layerQuant_t *lq, const size_t *widths
         shape_t *ms = reserveMemory(sizeof(shape_t));
         setShape(ms, md, 1, mo);
         tensor_t *mask = initTensor(ms, quantizationInitBool(), NULL);
+        g_maskBytes += (16 + 7) / 8;
         model[m++] = dropoutLayerInit(pDrop, mask, lq->forwardMath, lq->backwardMath);
     }
     model[m++] = linearLayerInit(&(linearInit_t){.inFeatures = 16, .outFeatures = g_NC}, lq);
@@ -380,6 +384,72 @@ static size_t countParams(void) {
         }
     }
     return n;
+}
+
+/* ---- Layer A: exact model accounting (bytes; spec 2026-07-02-memory-time-probes) ----
+ * NOTE: current build is STAGE1_USE_GROUPNORM=0 (LayerNorm substitute, see the
+ * file-header comment) — this accounting walks g_params/calcOutputShape and is
+ * norm-agnostic, so it runs unchanged, but the byte counts it produces are
+ * plumbing-valid only, NOT the paper numbers (LayerNorm's [C,L] affine adds
+ * params GroupNorm(1,C) wouldn't have). */
+typedef struct memBudget {
+    size_t params, grads, optstate, act, gradbuf, io, masks, mcuTotal, datasetHost;
+} memBudget_t;
+
+static size_t shapeBytesF32(const shape_t *s) {
+    size_t n = 1;
+    for (size_t d = 0; d < s->numberOfDimensions; d++) {
+        n *= s->dimensions[d];
+    }
+    return n * sizeof(float);
+}
+
+static memBudget_t computeMemBudget(layer_t **model, size_t modelSize) {
+    memBudget_t b = {0};
+    for (size_t i = 0; i < g_numParamLayers; i++) {
+        b.params += calcNumberOfElementsByTensor(g_params[i].w->param) * sizeof(float);
+        b.grads += calcNumberOfElementsByTensor(g_params[i].w->grad) * sizeof(float);
+        if (g_params[i].b != NULL) {
+            b.params += calcNumberOfElementsByTensor(g_params[i].b->param) * sizeof(float);
+            b.grads += calcNumberOfElementsByTensor(g_params[i].b->grad) * sizeof(float);
+        }
+    }
+    b.optstate = b.params; /* SGD-M: one momentum buffer per parameter element */
+
+    /* Activation chain: replay calcOutputShape from [1, C, T]. ODT keeps every
+     * layer output alive across one sample's fwd+bwd, so act = sum of outputs;
+     * the backward ping-pong grad buffers add max adjacent pair. */
+    size_t dimsA[8] = {1, g_C, g_T};
+    size_t ordA[8] = {0, 1, 2};
+    size_t dimsB[8] = {0};
+    size_t ordB[8] = {0};
+    shape_t cur = {.numberOfDimensions = 3, .dimensions = dimsA, .orderOfDimensions = ordA};
+    shape_t nxt = {.numberOfDimensions = 0, .dimensions = dimsB, .orderOfDimensions = ordB};
+
+    size_t outBytes[MAX_LAYERS + 1];
+    outBytes[0] = shapeBytesF32(&cur); /* layerOutputs[0] = the input */
+    for (size_t i = 0; i < modelSize; i++) {
+        layerFunctions[model[i]->type].calcOutputShape(model[i], &cur, &nxt);
+        outBytes[i + 1] = shapeBytesF32(&nxt);
+        b.act += outBytes[i + 1];
+        memcpy(cur.dimensions, nxt.dimensions, nxt.numberOfDimensions * sizeof(size_t));
+        memcpy(cur.orderOfDimensions, nxt.orderOfDimensions,
+               nxt.numberOfDimensions * sizeof(size_t));
+        cur.numberOfDimensions = nxt.numberOfDimensions;
+    }
+    for (size_t i = 0; i < modelSize; i++) {
+        size_t pair = outBytes[i] + outBytes[i + 1];
+        if (pair > b.gradbuf) {
+            b.gradbuf = pair;
+        }
+    }
+    b.io = outBytes[0] + g_NC * sizeof(float); /* one window in RAM + one-hot label */
+    b.masks = g_maskBytes;
+    b.mcuTotal = b.params + b.grads + b.optstate + b.act + b.gradbuf + b.io + b.masks;
+    /* Host-only, flash-resident on MCU — excluded from mcuTotal by design: */
+    b.datasetHost = (getTrainSize() + getTestSize()) *
+                    (g_C * g_T * sizeof(float) + g_NC * sizeof(float));
+    return b;
 }
 
 /* ---------- optimizer (SGD-M, bias-safe) ----------
@@ -529,6 +599,150 @@ static void stateDictLoad(layer_t **model, size_t modelSize, const char *dir) {
     }
 }
 
+/* ---------- training entry point (run on the Layer-C painted stack) ---------- */
+
+typedef struct trainCtx {
+    layer_t **model;
+    size_t modelSize;
+    optimizer_t *sgd;
+    dataLoader_t *testLoader;
+    lossConfig_t lossCfg;
+    /* config */
+    int nEpochs, batchSize;
+    uint32_t seed;
+    float lr0;
+    bool cosine;
+    const char *ckptDir;
+    /* outputs */
+    float bestAcc;
+    int bestEpoch;
+} trainCtx_t;
+
+/* Everything the epoch loop + best-epoch snapshot + ckpt/manifest write used
+ * to do directly in main() now lives here so it can run on a dedicated,
+ * paint-scannable stack (Layer C). ensureDir()/calloc() failures that used to
+ * `return 1;` from main() now exit(1) directly — exit() terminates the whole
+ * process regardless of which thread calls it, so the abort semantics are
+ * unchanged. k/dil/pDrop/nParams are re-derived here (env vars are
+ * process-global; countParams() re-reads the already-built g_params
+ * registry) rather than threaded through trainCtx_t, to keep the context
+ * struct limited to what the epoch loop itself needs. */
+static void *trainMain(void *argp) {
+    trainCtx_t *ctx = (trainCtx_t *)argp;
+
+    snapshotAlloc();
+    FILE *hist = NULL;
+    if (ctx->ckptDir != NULL) {
+        if (ensureDir(ctx->ckptDir) != 0) {
+            exit(1);
+        }
+        char hp[512];
+        snprintf(hp, sizeof(hp), "%s/history.csv", ctx->ckptDir);
+        hist = fopen(hp, "w");
+        if (hist) {
+            fprintf(hist, "epoch,lr,train_loss,val_loss,val_acc,val_precision,val_recall\n");
+        }
+    }
+
+    float bestAcc = -1.0f;
+    int bestEpoch = 0;
+    for (int e = 0; e < ctx->nEpochs; e++) {
+        float lrE = ctx->cosine
+                        ? 0.5f * ctx->lr0 * (1.0f + cosf(PI_F * (float)e / (float)ctx->nEpochs))
+                        : ctx->lr0;
+        ctx->sgd->impl->sgd->learningRate = lrE;
+
+        /* fresh loader per epoch -> per-epoch reshuffle, deterministic in (seed, epoch) */
+        dataLoader_t *trainLoader =
+            dataLoaderInit(getTrainSample, getTrainSize, (uint16_t)ctx->batchSize, NULL, NULL,
+                           true, (uint64_t)ctx->seed + (uint64_t)e, true);
+        float trainLoss = trainingEpochDefault(ctx->model, ctx->modelSize, ctx->lossCfg,
+                                               trainLoader, ctx->sgd, calculateGradsSequential,
+                                               REDUCTION_MEAN);
+        freeDataLoader(trainLoader);
+
+        epochStats_t st = evaluationEpochWithMetrics(ctx->model, ctx->modelSize, CROSS_ENTROPY,
+                                                     ctx->testLoader, inferenceWithLoss,
+                                                     REDUCTION_MEAN);
+        printf("EPOCH %d train_loss=%.4f train_acc=-1 val_loss=%.4f val_acc=%.4f\n", e + 1,
+               (double)trainLoss, (double)st.loss, (double)st.accuracy);
+        fflush(stdout);
+        if (hist) {
+            fprintf(hist, "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", e + 1, (double)lrE,
+                    (double)trainLoss, (double)st.loss, (double)st.accuracy, (double)st.precision,
+                    (double)st.recall);
+        }
+        if (st.accuracy > bestAcc) {
+            bestAcc = st.accuracy;
+            bestEpoch = e + 1;
+            snapshotSave();
+        }
+    }
+    if (hist) {
+        fclose(hist);
+    }
+
+    snapshotRestore();
+
+    if (ctx->ckptDir != NULL) {
+        ckptWrite(ctx->ckptDir);
+
+        /* confusion matrix of the restored best model, for the manifest
+         * (heap-sized to g_NC*g_NC — evaluationEpochWithReport writes that
+         * many entries, so a fixed buffer would overflow for NC > 6) */
+        size_t *cm = calloc(g_NC * g_NC, sizeof(size_t));
+        if (cm == NULL) {
+            fprintf(stderr, "ERROR: cannot allocate %zux%zu confusion matrix\n", g_NC, g_NC);
+            exit(1);
+        }
+        classificationReport_t rep = evaluationEpochWithReport(
+            ctx->model, ctx->modelSize, CROSS_ENTROPY, ctx->testLoader, inferenceWithLoss, cm,
+            g_NC, REDUCTION_MEAN);
+
+        size_t nParams = countParams();
+        size_t k = (size_t)env_int("ODT_KERNEL_SIZE", 7);
+        size_t dil = (size_t)env_int("ODT_DILATION", 3);
+        float pDrop = env_float("ODT_P_DROP", 0.0f);
+        float momentum = ctx->sgd->impl->sgd->momentumFactor;
+        float weightDecay = ctx->sgd->impl->sgd->weightDecay;
+
+        char mp[512];
+        snprintf(mp, sizeof(mp), "%s/manifest.json", ctx->ckptDir);
+        FILE *mf = fopen(mp, "w");
+        if (mf) {
+            fprintf(mf, "{\n  \"example\": \"stage1_pretrain\",\n");
+            fprintf(mf, "  \"data_dir\": \"%s\",\n  \"fold_scheme\": \"%s\",\n  \"fold\": %s,\n",
+                    env_str("SMATABLE_DATA_DIR", "?"), env_str("SMATABLE_FOLD_SCHEME", "?"),
+                    env_str("SMATABLE_FOLD", "?"));
+            fprintf(mf, "  \"widths\": \"%s\", \"kernel_size\": %zu, \"dilation\": %zu, "
+                        "\"p_drop\": %.4f,\n",
+                    env_str("ODT_WIDTHS", "8,12,8"), k, dil, (double)pDrop);
+            fprintf(mf, "  \"lr\": %.6f, \"momentum\": %.4f, \"weight_decay\": %.6f, "
+                        "\"epochs\": %d, \"batch_size\": %d, \"seed\": %u, "
+                        "\"lr_schedule\": \"%s\",\n",
+                    (double)ctx->lr0, (double)momentum, (double)weightDecay, ctx->nEpochs,
+                    ctx->batchSize, (unsigned)ctx->seed, ctx->cosine ? "cosine" : "constant");
+            fprintf(mf, "  \"best_epoch\": %d, \"best_val_acc\": %.6f,\n", bestEpoch,
+                    (double)bestAcc);
+            fprintf(mf, "  \"restored_val_acc\": %.6f, \"val_precision\": %.6f, "
+                        "\"val_recall\": %.6f,\n",
+                    (double)rep.stats.accuracy, (double)rep.stats.precision,
+                    (double)rep.stats.recall);
+            fprintf(mf, "  \"n_params\": %zu,\n  \"conf_mat_pred_x_actual\": [", nParams);
+            for (size_t i = 0; i < g_NC * g_NC; i++) {
+                fprintf(mf, "%zu%s", cm[i], (i + 1 < g_NC * g_NC) ? ", " : "");
+            }
+            fprintf(mf, "]\n}\n");
+            fclose(mf);
+        }
+        free(cm);
+    }
+
+    ctx->bestAcc = bestAcc;
+    ctx->bestEpoch = bestEpoch;
+    return NULL;
+}
+
 /* ---------- main ---------- */
 
 int main(void) {
@@ -564,6 +778,11 @@ int main(void) {
     buildSplit(&g_train, ds, true);
     buildSplit(&g_test, ds, false);
     smatableDatasetClose(ds);
+#if MEM_PROBE_AVAILABLE
+    long rssAfterData = memProbeRssNowKb();
+#else
+    long rssAfterData = -1;
+#endif
     printf("  dataset: train=%zu test=%zu C=%zu T=%zu NC=%zu\n", getTrainSize(), getTestSize(),
            g_C, g_T, g_NC);
 
@@ -633,6 +852,17 @@ int main(void) {
 
     optimizer_t *sgd = buildSgdM(lr0, momentum, weightDecay);
     optimizerFunctions_t optimFns = optimizerFunctions[SGD_M];
+#if MEM_PROBE_AVAILABLE
+    long rssAfterModel = memProbeRssNowKb();
+#else
+    long rssAfterModel = -1;
+#endif
+    memBudget_t mb = computeMemBudget(model, modelSize);
+    if (mb.params != nParams * sizeof(float) || mb.optstate != mb.params) {
+        fprintf(stderr, "mem accounting inconsistent: params=%zu n_params*4=%zu\n", mb.params,
+                nParams * sizeof(float));
+        return 1;
+    }
 
     /* ---- V2: single-batch grad-parity mode ---- */
     if (env_flag("ODT_SINGLE_BATCH")) {
@@ -676,105 +906,80 @@ int main(void) {
         return 0;
     }
 
-    /* ---- training ---- */
-    snapshotAlloc();
-    FILE *hist = NULL;
+    /* ---- training (runs on trainMain, driven from a dedicated Layer-C
+     * painted stack when available) ---- */
+    trainCtx_t ctx = {.model = model,
+                      .modelSize = modelSize,
+                      .sgd = sgd,
+                      .testLoader = testLoader,
+                      .lossCfg = lossCfg,
+                      .nEpochs = nEpochs,
+                      .batchSize = batchSize,
+                      .seed = seed,
+                      .lr0 = lr0,
+                      .cosine = cosine,
+                      .ckptDir = ckptDir,
+                      .bestAcc = -1.0f,
+                      .bestEpoch = 0};
+#if MEM_PROBE_AVAILABLE
+    long stackPeak = memProbeRunOnPaintedStack(trainMain, &ctx);
+    if (stackPeak < 0) {
+        trainMain(&ctx); /* fallback: run inline, report stack_peak_b=-1 */
+    }
+#else
+    long stackPeak = -1;
+    trainMain(&ctx);
+#endif
+
+    double cpuU, cpuS;
+    long maxRssKb;
+#if MEM_PROBE_AVAILABLE
+    memProbeRusage(&cpuU, &cpuS, &maxRssKb);
+#else
+    cpuU = 0.0;
+    cpuS = 0.0;
+    maxRssKb = -1;
+#endif
+    printf("RESULT accuracy=%.6f best_epoch=%d n_params=%zu wall_clock_s=%.3f "
+           "mem_params_b=%zu mem_grads_b=%zu mem_optstate_b=%zu mem_act_b=%zu "
+           "mem_gradbuf_b=%zu mem_io_b=%zu mem_masks_b=%zu mem_mcu_total_b=%zu "
+           "mem_dataset_host_b=%zu rss_peak_kb=%ld rss_after_data_kb=%ld "
+           "rss_after_model_kb=%ld cpu_user_s=%.3f cpu_sys_s=%.3f stack_peak_b=%ld\n",
+           (double)ctx.bestAcc, ctx.bestEpoch, nParams, mono_s() - t0, mb.params, mb.grads,
+           mb.optstate, mb.act, mb.gradbuf, mb.io, mb.masks, mb.mcuTotal, mb.datasetHost,
+           maxRssKb, rssAfterData, rssAfterModel, cpuU, cpuS, stackPeak);
+
+    /* Same probe keys as RESULT, mirrored to <ckpt>/memory.json; manifest.json
+     * (written inside trainMain) is untouched. */
     if (ckptDir != NULL) {
-        if (ensureDir(ckptDir) != 0) {
-            return 1;
-        }
-        char hp[512];
-        snprintf(hp, sizeof(hp), "%s/history.csv", ckptDir);
-        hist = fopen(hp, "w");
-        if (hist) {
-            fprintf(hist, "epoch,lr,train_loss,val_loss,val_acc,val_precision,val_recall\n");
-        }
-    }
-
-    float bestAcc = -1.0f;
-    int bestEpoch = 0;
-    for (int e = 0; e < nEpochs; e++) {
-        float lrE = cosine ? 0.5f * lr0 * (1.0f + cosf(PI_F * (float)e / (float)nEpochs)) : lr0;
-        sgd->impl->sgd->learningRate = lrE;
-
-        /* fresh loader per epoch -> per-epoch reshuffle, deterministic in (seed, epoch) */
-        dataLoader_t *trainLoader =
-            dataLoaderInit(getTrainSample, getTrainSize, (uint16_t)batchSize, NULL, NULL, true,
-                           (uint64_t)seed + (uint64_t)e, true);
-        float trainLoss = trainingEpochDefault(model, modelSize, lossCfg, trainLoader, sgd,
-                                               calculateGradsSequential, REDUCTION_MEAN);
-        freeDataLoader(trainLoader);
-
-        epochStats_t st = evaluationEpochWithMetrics(model, modelSize, CROSS_ENTROPY, testLoader,
-                                                     inferenceWithLoss, REDUCTION_MEAN);
-        printf("EPOCH %d train_loss=%.4f train_acc=-1 val_loss=%.4f val_acc=%.4f\n", e + 1,
-               (double)trainLoss, (double)st.loss, (double)st.accuracy);
-        fflush(stdout);
-        if (hist) {
-            fprintf(hist, "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", e + 1, (double)lrE,
-                    (double)trainLoss, (double)st.loss, (double)st.accuracy, (double)st.precision,
-                    (double)st.recall);
-        }
-        if (st.accuracy > bestAcc) {
-            bestAcc = st.accuracy;
-            bestEpoch = e + 1;
-            snapshotSave();
+        char memPath[512];
+        snprintf(memPath, sizeof(memPath), "%s/memory.json", ckptDir);
+        FILE *mjf = fopen(memPath, "w");
+        if (mjf) {
+            fprintf(mjf,
+                    "{\n"
+                    "  \"mem_params_b\": %zu,\n"
+                    "  \"mem_grads_b\": %zu,\n"
+                    "  \"mem_optstate_b\": %zu,\n"
+                    "  \"mem_act_b\": %zu,\n"
+                    "  \"mem_gradbuf_b\": %zu,\n"
+                    "  \"mem_io_b\": %zu,\n"
+                    "  \"mem_masks_b\": %zu,\n"
+                    "  \"mem_mcu_total_b\": %zu,\n"
+                    "  \"mem_dataset_host_b\": %zu,\n"
+                    "  \"rss_peak_kb\": %ld,\n"
+                    "  \"rss_after_data_kb\": %ld,\n"
+                    "  \"rss_after_model_kb\": %ld,\n"
+                    "  \"cpu_user_s\": %.6f,\n"
+                    "  \"cpu_sys_s\": %.6f,\n"
+                    "  \"stack_peak_b\": %ld\n"
+                    "}\n",
+                    mb.params, mb.grads, mb.optstate, mb.act, mb.gradbuf, mb.io, mb.masks,
+                    mb.mcuTotal, mb.datasetHost, maxRssKb, rssAfterData, rssAfterModel, cpuU,
+                    cpuS, stackPeak);
+            fclose(mjf);
         }
     }
-    if (hist) {
-        fclose(hist);
-    }
 
-    snapshotRestore();
-
-    if (ckptDir != NULL) {
-        ckptWrite(ckptDir);
-
-        /* confusion matrix of the restored best model, for the manifest
-         * (heap-sized to g_NC*g_NC — evaluationEpochWithReport writes that
-         * many entries, so a fixed buffer would overflow for NC > 6) */
-        size_t *cm = calloc(g_NC * g_NC, sizeof(size_t));
-        if (cm == NULL) {
-            fprintf(stderr, "ERROR: cannot allocate %zux%zu confusion matrix\n", g_NC, g_NC);
-            return 1;
-        }
-        classificationReport_t rep = evaluationEpochWithReport(
-            model, modelSize, CROSS_ENTROPY, testLoader, inferenceWithLoss, cm, g_NC,
-            REDUCTION_MEAN);
-
-        char mp[512];
-        snprintf(mp, sizeof(mp), "%s/manifest.json", ckptDir);
-        FILE *mf = fopen(mp, "w");
-        if (mf) {
-            fprintf(mf, "{\n  \"example\": \"stage1_pretrain\",\n");
-            fprintf(mf, "  \"data_dir\": \"%s\",\n  \"fold_scheme\": \"%s\",\n  \"fold\": %s,\n",
-                    env_str("SMATABLE_DATA_DIR", "?"), env_str("SMATABLE_FOLD_SCHEME", "?"),
-                    env_str("SMATABLE_FOLD", "?"));
-            fprintf(mf, "  \"widths\": \"%s\", \"kernel_size\": %zu, \"dilation\": %zu, "
-                        "\"p_drop\": %.4f,\n",
-                    env_str("ODT_WIDTHS", "8,12,8"), k, dil, (double)pDrop);
-            fprintf(mf, "  \"lr\": %.6f, \"momentum\": %.4f, \"weight_decay\": %.6f, "
-                        "\"epochs\": %d, \"batch_size\": %d, \"seed\": %u, "
-                        "\"lr_schedule\": \"%s\",\n",
-                    (double)lr0, (double)momentum, (double)weightDecay, nEpochs, batchSize,
-                    (unsigned)seed, cosine ? "cosine" : "constant");
-            fprintf(mf, "  \"best_epoch\": %d, \"best_val_acc\": %.6f,\n", bestEpoch,
-                    (double)bestAcc);
-            fprintf(mf, "  \"restored_val_acc\": %.6f, \"val_precision\": %.6f, "
-                        "\"val_recall\": %.6f,\n",
-                    (double)rep.stats.accuracy, (double)rep.stats.precision,
-                    (double)rep.stats.recall);
-            fprintf(mf, "  \"n_params\": %zu,\n  \"conf_mat_pred_x_actual\": [", nParams);
-            for (size_t i = 0; i < g_NC * g_NC; i++) {
-                fprintf(mf, "%zu%s", cm[i], (i + 1 < g_NC * g_NC) ? ", " : "");
-            }
-            fprintf(mf, "]\n}\n");
-            fclose(mf);
-        }
-        free(cm);
-    }
-
-    printf("RESULT accuracy=%.6f best_epoch=%d n_params=%zu wall_clock_s=%.3f\n",
-           (double)bestAcc, bestEpoch, nParams, mono_s() - t0);
     return 0;
 }
