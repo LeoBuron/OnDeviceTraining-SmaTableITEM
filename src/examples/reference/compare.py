@@ -39,7 +39,14 @@ import subprocess
 import sys
 from typing import Callable
 
-RUNS_DIR = pathlib.Path(__file__).resolve().parents[3] / "runs"
+_RUNS_BASE = pathlib.Path(__file__).resolve().parents[3] / "runs"
+# Optional subdirectory to keep new comparison runs isolated from older baselines.
+# Per-example wrappers should import RUNS_DIR (lazily resolved) instead of caching.
+def _runs_dir() -> pathlib.Path:
+    sub = os.environ.get("RUNS_SUBDIR", "").strip()
+    return (_RUNS_BASE / sub) if sub else _RUNS_BASE
+
+RUNS_DIR = _runs_dir()
 
 
 def write_run_metadata(csv_path, meta):
@@ -81,7 +88,8 @@ def run_odt_seeds(cfg: Config) -> list[float]:
     spiegelt PyTorch-Seite — gleiche Struktur, framework='odt', seed wird
     pro Lauf injected). Liefert eine Liste der End-Metriken.
     """
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    runs_dir = _runs_dir()
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     env_build = os.environ.copy()
     cmake_cfg = subprocess.run(
@@ -100,7 +108,7 @@ def run_odt_seeds(cfg: Config) -> list[float]:
 
     results: list[float] = []
     for seed in range(cfg.n_seeds):
-        csv_path = RUNS_DIR / f"{cfg.example_name}_odt_seed{seed:02d}.csv"
+        csv_path = runs_dir / f"{cfg.example_name}_odt_seed{seed:02d}.csv"
         # ODT's rngSetSeed maps 0→state=1, which collides with seed=1. Offset
         # by +1 so seeds 0..N-1 drive N distinct xorshift32 states. The `seed`
         # field in sidecar metadata keeps the bookkeeping index; `shuffle_seed`

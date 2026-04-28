@@ -77,8 +77,8 @@ static size_t getTestSize (void) { return testDataset.items->size;  }
 static void flattenItems(tensorArray_t *arr) {
     for (size_t i = 0; i < arr->size; i++) {
         shape_t *shape = arr->array[i]->shape;
-        size_t *newDims  = *reserveMemory(2 * sizeof(size_t));
-        size_t *newOrder = *reserveMemory(2 * sizeof(size_t));
+        size_t *newDims  = reserveMemory(2 * sizeof(size_t));
+        size_t *newOrder = reserveMemory(2 * sizeof(size_t));
         newDims[0] = shape->dimensions[0];
         newDims[1] = shape->dimensions[1] * shape->dimensions[2];
         newOrder[0] = 0;
@@ -93,13 +93,13 @@ static void flattenItems(tensorArray_t *arr) {
 
 static void buildModel(layer_t **m, quantization_t *q) {
     static float w0[HIDDEN_DIM * INPUT_DIM] = {0};
-    size_t w0Dims[] = {HIDDEN_DIM, INPUT_DIM};
+    static size_t w0Dims[] = {HIDDEN_DIM, INPUT_DIM};
     tensor_t *w0P = tensorInitWithDistribution(XAVIER_UNIFORM, w0, w0Dims, 2, q, NULL, INPUT_DIM, HIDDEN_DIM);
     tensor_t *w0G = gradInitFloat(w0P, NULL);
     parameter_t *w0Pm = parameterInit(w0P, w0G);
 
     static float b0[HIDDEN_DIM] = {0};
-    size_t b0Dims[] = {1, HIDDEN_DIM};
+    static size_t b0Dims[] = {1, HIDDEN_DIM};
     tensor_t *b0P = tensorInitWithDistribution(ZEROS, b0, b0Dims, 2, q, NULL, 1, HIDDEN_DIM);
     tensor_t *b0G = gradInitFloat(b0P, NULL);
     parameter_t *b0Pm = parameterInit(b0P, b0G);
@@ -108,13 +108,13 @@ static void buildModel(layer_t **m, quantization_t *q) {
     m[1] = reluLayerInit(q, q);
 
     static float w1[OUTPUT_DIM * HIDDEN_DIM] = {0};
-    size_t w1Dims[] = {OUTPUT_DIM, HIDDEN_DIM};
+    static size_t w1Dims[] = {OUTPUT_DIM, HIDDEN_DIM};
     tensor_t *w1P = tensorInitWithDistribution(XAVIER_UNIFORM, w1, w1Dims, 2, q, NULL, HIDDEN_DIM, OUTPUT_DIM);
     tensor_t *w1G = gradInitFloat(w1P, NULL);
     parameter_t *w1Pm = parameterInit(w1P, w1G);
 
     static float b1[OUTPUT_DIM] = {0};
-    size_t b1Dims[] = {1, OUTPUT_DIM};
+    static size_t b1Dims[] = {1, OUTPUT_DIM};
     tensor_t *b1P = tensorInitWithDistribution(ZEROS, b1, b1Dims, 2, q, NULL, 1, OUTPUT_DIM);
     tensor_t *b1G = gradInitFloat(b1P, NULL);
     parameter_t *b1Pm = parameterInit(b1P, b1G);
@@ -173,16 +173,17 @@ static void csvInit(void) {
     printf("CSV log: %s\n", csvPath);
 }
 
-static void onEpochEnd(size_t epoch, float trainLoss, float evalLoss) {
-    float acc = evaluationEpochAccuracy(model, MODEL_SIZE, testDL, NUM_CLASSES, inference);
+static void onEpochEnd(size_t epoch, float trainLoss, epochStats_t evalStats) {
     FILE *f = fopen(csvPath, "a");
     if (f) {
         fprintf(f, "%zu,%.6f,%.6f,%.6f\n",
-                epoch + 1, (double)trainLoss, (double)evalLoss, (double)(acc * 100.0));
+                epoch + 1, (double)trainLoss, (double)evalStats.loss,
+                (double)(evalStats.accuracy * 100.0));
         fclose(f);
     }
     printf("  epoch %zu: train_loss=%.4f eval_loss=%.4f test_acc=%.2f%%\n",
-           epoch + 1, (double)trainLoss, (double)evalLoss, (double)(acc * 100.0));
+           epoch + 1, (double)trainLoss, (double)evalStats.loss,
+           (double)(evalStats.accuracy * 100.0));
 }
 
 int main(void) {
@@ -221,18 +222,21 @@ int main(void) {
 
     csvInit();
 
+    lossConfig_t lossConfig = { .funcType = CROSS_ENTROPY, .reduction = REDUCTION_MEAN };
     clock_t t0 = clock();
     trainingRunResult_t res = trainingRun(
-        model, MODEL_SIZE, CROSS_ENTROPY,
+        model, MODEL_SIZE, lossConfig,
         trainDL, testDL, sgd, NUM_EPOCHS,
         calculateGradsSequential, inferenceWithLoss, onEpochEnd);
     clock_t t1 = clock();
 
-    float accuracy = evaluationEpochAccuracy(model, MODEL_SIZE, testDL, NUM_CLASSES, inference);
+    float accuracy = evaluationEpochWithMetrics(
+        model, MODEL_SIZE, CROSS_ENTROPY, testDL, inferenceWithLoss).accuracy;
 
     printf("Training done in %.2fs. final_train_loss=%.4f final_eval_loss=%.4f accuracy=%.2f%%\n",
            (double)(t1 - t0) / CLOCKS_PER_SEC,
-           (double)res.finalTrainLoss, (double)res.finalEvalLoss, (double)accuracy * 100.0);
+           (double)res.finalTrainLoss, (double)res.finalEvalStats.loss,
+           (double)accuracy * 100.0);
 
     /* Only write canonical pretrained.h when no seed override is in effect —
      * keeps the committed .h deterministic during seed-sweep comparisons. */

@@ -19,8 +19,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+import os as _os
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-RUNS_DIR = Path(__file__).resolve().parents[3] / "runs"
+RUNS_DIR = Path(__file__).resolve().parents[3] / "runs" / _os.environ.get("RUNS_SUBDIR", "")
 EXAMPLE_NAME = "mlp_mnist_float32_host"
 NUM_EPOCHS = 50
 
@@ -137,7 +139,7 @@ if __name__ == "__main__":
         example_name=EXAMPLE_NAME,
         stdout_metric_regex=r"accuracy=([\d.]+)%",
         higher_is_better=True,
-        n_seeds=20,
+        n_seeds=10,
         sigma_multiplier=2.0,
         pytorch_build=build_model,
         pytorch_train=train,

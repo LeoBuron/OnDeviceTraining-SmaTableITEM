@@ -84,8 +84,8 @@ static size_t getTestSize (void) { return testDataset.items->size;  }
 static void flattenItems(tensorArray_t *arr) {
     for (size_t i = 0; i < arr->size; i++) {
         shape_t *shape = arr->array[i]->shape;
-        size_t *newDims  = *reserveMemory(2 * sizeof(size_t));
-        size_t *newOrder = *reserveMemory(2 * sizeof(size_t));
+        size_t *newDims  = reserveMemory(2 * sizeof(size_t));
+        size_t *newOrder = reserveMemory(2 * sizeof(size_t));
         newDims[0] = shape->dimensions[0];
         newDims[1] = shape->dimensions[1] * shape->dimensions[2];
         newOrder[0] = 0;
@@ -111,16 +111,17 @@ static void csvInit(void) {
     printf("CSV log: %s\n", csvPath);
 }
 
-static void onEpochEnd(size_t epoch, float trainLoss, float evalLoss) {
-    float acc = evaluationEpochAccuracy(model, MODEL_SIZE, testDL, NUM_CLASSES, inference);
+static void onEpochEnd(size_t epoch, float trainLoss, epochStats_t evalStats) {
     FILE *f = fopen(csvPath, "a");
     if (f) {
         fprintf(f, "%zu,%.6f,%.6f,%.6f\n",
-                epoch + 1, (double)trainLoss, (double)evalLoss, (double)(acc * 100.0));
+                epoch + 1, (double)trainLoss, (double)evalStats.loss,
+                (double)(evalStats.accuracy * 100.0));
         fclose(f);
     }
     printf("  epoch %zu: train_loss=%.4f eval_loss=%.4f test_acc=%.2f%%\n",
-           epoch + 1, (double)trainLoss, (double)evalLoss, (double)(acc * 100.0));
+           epoch + 1, (double)trainLoss, (double)evalStats.loss,
+           (double)(evalStats.accuracy * 100.0));
 }
 
 int main(void) {
@@ -156,13 +157,13 @@ int main(void) {
      * LAYER 1: Linear 784 -> 256  (ABSICHTLICH OHNE HELPER — Boilerplate sichtbar)
      * ========================================================================= */
     static float w0[H1_DIM * INPUT_DIM] = {0};
-    size_t w0Dims[] = {H1_DIM, INPUT_DIM};
+    static size_t w0Dims[] = {H1_DIM, INPUT_DIM};
     tensor_t *w0P = tensorInitWithDistribution(XAVIER_UNIFORM, w0, w0Dims, 2, q, NULL, INPUT_DIM, H1_DIM);
     tensor_t *w0G = gradInitFloat(w0P, NULL);
     parameter_t *w0Pm = parameterInit(w0P, w0G);
 
     static float b0[H1_DIM] = {0};
-    size_t b0Dims[] = {1, H1_DIM};
+    static size_t b0Dims[] = {1, H1_DIM};
     tensor_t *b0P = tensorInitWithDistribution(ZEROS, b0, b0Dims, 2, q, NULL, 1, H1_DIM);
     tensor_t *b0G = gradInitFloat(b0P, NULL);
     parameter_t *b0Pm = parameterInit(b0P, b0G);
@@ -174,13 +175,13 @@ int main(void) {
      * LAYER 2: Linear 256 -> 128
      * ========================================================================= */
     static float w1[H2_DIM * H1_DIM] = {0};
-    size_t w1Dims[] = {H2_DIM, H1_DIM};
+    static size_t w1Dims[] = {H2_DIM, H1_DIM};
     tensor_t *w1P = tensorInitWithDistribution(XAVIER_UNIFORM, w1, w1Dims, 2, q, NULL, H1_DIM, H2_DIM);
     tensor_t *w1G = gradInitFloat(w1P, NULL);
     parameter_t *w1Pm = parameterInit(w1P, w1G);
 
     static float b1[H2_DIM] = {0};
-    size_t b1Dims[] = {1, H2_DIM};
+    static size_t b1Dims[] = {1, H2_DIM};
     tensor_t *b1P = tensorInitWithDistribution(ZEROS, b1, b1Dims, 2, q, NULL, 1, H2_DIM);
     tensor_t *b1G = gradInitFloat(b1P, NULL);
     parameter_t *b1Pm = parameterInit(b1P, b1G);
@@ -192,13 +193,13 @@ int main(void) {
      * LAYER 3: Linear 128 -> 64
      * ========================================================================= */
     static float w2[H3_DIM * H2_DIM] = {0};
-    size_t w2Dims[] = {H3_DIM, H2_DIM};
+    static size_t w2Dims[] = {H3_DIM, H2_DIM};
     tensor_t *w2P = tensorInitWithDistribution(XAVIER_UNIFORM, w2, w2Dims, 2, q, NULL, H2_DIM, H3_DIM);
     tensor_t *w2G = gradInitFloat(w2P, NULL);
     parameter_t *w2Pm = parameterInit(w2P, w2G);
 
     static float b2[H3_DIM] = {0};
-    size_t b2Dims[] = {1, H3_DIM};
+    static size_t b2Dims[] = {1, H3_DIM};
     tensor_t *b2P = tensorInitWithDistribution(ZEROS, b2, b2Dims, 2, q, NULL, 1, H3_DIM);
     tensor_t *b2G = gradInitFloat(b2P, NULL);
     parameter_t *b2Pm = parameterInit(b2P, b2G);
@@ -210,13 +211,13 @@ int main(void) {
      * LAYER 4: Linear 64 -> 32
      * ========================================================================= */
     static float w3[H4_DIM * H3_DIM] = {0};
-    size_t w3Dims[] = {H4_DIM, H3_DIM};
+    static size_t w3Dims[] = {H4_DIM, H3_DIM};
     tensor_t *w3P = tensorInitWithDistribution(XAVIER_UNIFORM, w3, w3Dims, 2, q, NULL, H3_DIM, H4_DIM);
     tensor_t *w3G = gradInitFloat(w3P, NULL);
     parameter_t *w3Pm = parameterInit(w3P, w3G);
 
     static float b3[H4_DIM] = {0};
-    size_t b3Dims[] = {1, H4_DIM};
+    static size_t b3Dims[] = {1, H4_DIM};
     tensor_t *b3P = tensorInitWithDistribution(ZEROS, b3, b3Dims, 2, q, NULL, 1, H4_DIM);
     tensor_t *b3G = gradInitFloat(b3P, NULL);
     parameter_t *b3Pm = parameterInit(b3P, b3G);
@@ -228,13 +229,13 @@ int main(void) {
      * LAYER 5: Linear 32 -> 10 + Softmax
      * ========================================================================= */
     static float w4[OUTPUT_DIM * H4_DIM] = {0};
-    size_t w4Dims[] = {OUTPUT_DIM, H4_DIM};
+    static size_t w4Dims[] = {OUTPUT_DIM, H4_DIM};
     tensor_t *w4P = tensorInitWithDistribution(XAVIER_UNIFORM, w4, w4Dims, 2, q, NULL, H4_DIM, OUTPUT_DIM);
     tensor_t *w4G = gradInitFloat(w4P, NULL);
     parameter_t *w4Pm = parameterInit(w4P, w4G);
 
     static float b4[OUTPUT_DIM] = {0};
-    size_t b4Dims[] = {1, OUTPUT_DIM};
+    static size_t b4Dims[] = {1, OUTPUT_DIM};
     tensor_t *b4P = tensorInitWithDistribution(ZEROS, b4, b4Dims, 2, q, NULL, 1, OUTPUT_DIM);
     tensor_t *b4G = gradInitFloat(b4P, NULL);
     parameter_t *b4Pm = parameterInit(b4P, b4G);
@@ -248,16 +249,19 @@ int main(void) {
 
     csvInit();
 
+    lossConfig_t lossConfig = { .funcType = CROSS_ENTROPY, .reduction = REDUCTION_MEAN };
     clock_t t0 = clock();
     trainingRunResult_t res = trainingRun(
-        model, MODEL_SIZE, CROSS_ENTROPY,
+        model, MODEL_SIZE, lossConfig,
         trainDL, testDL, sgd, NUM_EPOCHS,
         calculateGradsSequential, inferenceWithLoss, onEpochEnd);
     clock_t t1 = clock();
 
-    float accuracy = evaluationEpochAccuracy(model, MODEL_SIZE, testDL, NUM_CLASSES, inference);
+    float accuracy = evaluationEpochWithMetrics(
+        model, MODEL_SIZE, CROSS_ENTROPY, testDL, inferenceWithLoss).accuracy;
     printf("Done in %.2fs. final_train_loss=%.4f final_eval_loss=%.4f accuracy=%.2f%%\n",
            (double)(t1 - t0) / CLOCKS_PER_SEC,
-           (double)res.finalTrainLoss, (double)res.finalEvalLoss, (double)accuracy * 100.0);
+           (double)res.finalTrainLoss, (double)res.finalEvalStats.loss,
+           (double)accuracy * 100.0);
     return 0;
 }

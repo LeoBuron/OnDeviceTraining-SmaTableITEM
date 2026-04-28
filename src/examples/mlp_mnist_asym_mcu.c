@@ -82,12 +82,12 @@ static size_t getTestSize(void)  { return MNIST_TEST_SUBSET_SIZE;  }
 
 static void buildModel(layer_t **model, quantization_t *forwardQ, quantization_t *floatQ) {
     static float w0[HIDDEN_DIM * INPUT_DIM] = {0};
-    size_t w0Dims[] = {HIDDEN_DIM, INPUT_DIM};
+    static size_t w0Dims[] = {HIDDEN_DIM, INPUT_DIM};
     tensor_t *w0P = tensorInitWithDistribution(XAVIER_UNIFORM, w0, w0Dims, 2, floatQ, NULL, INPUT_DIM, HIDDEN_DIM);
     parameter_t *w0Pm = parameterInit(w0P, gradInitFloat(w0P, NULL));
 
     static float b0[HIDDEN_DIM] = {0};
-    size_t b0Dims[] = {1, HIDDEN_DIM};
+    static size_t b0Dims[] = {1, HIDDEN_DIM};
     tensor_t *b0P = tensorInitWithDistribution(ZEROS, b0, b0Dims, 2, floatQ, NULL, 1, HIDDEN_DIM);
     parameter_t *b0Pm = parameterInit(b0P, gradInitFloat(b0P, NULL));
 
@@ -95,12 +95,12 @@ static void buildModel(layer_t **model, quantization_t *forwardQ, quantization_t
     model[1] = reluLayerInit(forwardQ, floatQ);
 
     static float w1[OUTPUT_DIM * HIDDEN_DIM] = {0};
-    size_t w1Dims[] = {OUTPUT_DIM, HIDDEN_DIM};
+    static size_t w1Dims[] = {OUTPUT_DIM, HIDDEN_DIM};
     tensor_t *w1P = tensorInitWithDistribution(XAVIER_UNIFORM, w1, w1Dims, 2, floatQ, NULL, HIDDEN_DIM, OUTPUT_DIM);
     parameter_t *w1Pm = parameterInit(w1P, gradInitFloat(w1P, NULL));
 
     static float b1[OUTPUT_DIM] = {0};
-    size_t b1Dims[] = {1, OUTPUT_DIM};
+    static size_t b1Dims[] = {1, OUTPUT_DIM};
     tensor_t *b1P = tensorInitWithDistribution(ZEROS, b1, b1Dims, 2, floatQ, NULL, 1, OUTPUT_DIM);
     parameter_t *b1Pm = parameterInit(b1P, gradInitFloat(b1P, NULL));
 
@@ -108,9 +108,9 @@ static void buildModel(layer_t **model, quantization_t *forwardQ, quantization_t
     model[3] = softmaxLayerInit(floatQ, floatQ);
 }
 
-static void onEpochEnd(size_t epoch, float trainLoss, float evalLoss) {
+static void onEpochEnd(size_t epoch, float trainLoss, epochStats_t evalStats) {
     printf("  epoch %zu: train_loss=%.4f eval_loss=%.4f\n",
-           epoch + 1, (double)trainLoss, (double)evalLoss);
+           epoch + 1, (double)trainLoss, (double)evalStats.loss);
 }
 
 int main(void) {
@@ -133,13 +133,16 @@ int main(void) {
 
     optimizer_t *sgd = sgdMCreateOptim(LEARNING_RATE, 0.f, 0.f, model, MODEL_SIZE, FLOAT32);
 
+    lossConfig_t lossConfig = { .funcType = CROSS_ENTROPY, .reduction = REDUCTION_MEAN };
     trainingRunResult_t res = trainingRun(
-        model, MODEL_SIZE, CROSS_ENTROPY,
+        model, MODEL_SIZE, lossConfig,
         trainDL, testDL, sgd, NUM_EPOCHS,
         calculateGradsSequential, inferenceWithLoss, onEpochEnd);
 
-    float accuracy = evaluationEpochAccuracy(model, MODEL_SIZE, testDL, NUM_CLASSES, inference);
+    float accuracy = evaluationEpochWithMetrics(
+        model, MODEL_SIZE, CROSS_ENTROPY, testDL, inferenceWithLoss).accuracy;
     printf("Done. train_loss=%.4f eval_loss=%.4f subset_accuracy=%.2f%%\n",
-           (double)res.finalTrainLoss, (double)res.finalEvalLoss, (double)accuracy * 100.0);
+           (double)res.finalTrainLoss, (double)res.finalEvalStats.loss,
+           (double)accuracy * 100.0);
     return 0;
 }

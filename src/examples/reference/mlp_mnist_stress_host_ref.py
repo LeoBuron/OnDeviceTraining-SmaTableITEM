@@ -19,8 +19,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+import os as _os
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-RUNS_DIR = Path(__file__).resolve().parents[3] / "runs"
+RUNS_DIR = Path(__file__).resolve().parents[3] / "runs" / _os.environ.get("RUNS_SUBDIR", "")
 EXAMPLE_NAME = "mlp_mnist_stress_host"
 NUM_EPOCHS = 5
 

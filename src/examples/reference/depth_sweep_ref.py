@@ -27,8 +27,10 @@ import torch.nn as nn  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from torch.utils.data import DataLoader, TensorDataset  # noqa: E402
 
+import os as _os
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-RUNS_DIR = Path(__file__).resolve().parents[3] / "runs"
+RUNS_DIR = Path(__file__).resolve().parents[3] / "runs" / _os.environ.get("RUNS_SUBDIR", "")
 EXAMPLE_NAME = "mlp_mnist_depth_sweep_host"
 
 HIDDEN_DIM = 32

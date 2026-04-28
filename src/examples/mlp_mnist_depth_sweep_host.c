@@ -134,8 +134,8 @@ static size_t    getTestSize (void)        { return testDataset.items->size;  }
 static void flattenItems(tensorArray_t *arr) {
     for (size_t i = 0; i < arr->size; i++) {
         shape_t *shape = arr->array[i]->shape;
-        size_t *newDims  = *reserveMemory(2 * sizeof(size_t));
-        size_t *newOrder = *reserveMemory(2 * sizeof(size_t));
+        size_t *newDims  = reserveMemory(2 * sizeof(size_t));
+        size_t *newOrder = reserveMemory(2 * sizeof(size_t));
         newDims[0] = shape->dimensions[0];
         newDims[1] = shape->dimensions[1] * shape->dimensions[2];
         newOrder[0] = 0;
@@ -175,16 +175,17 @@ static void csvInit(void) {
     printf("CSV log: %s\n", csvPath);
 }
 
-static void onEpochEnd(size_t epoch, float trainLoss, float evalLoss) {
-    float acc = evaluationEpochAccuracy(model, MODEL_SIZE, testDL, NUM_CLASSES, inference);
+static void onEpochEnd(size_t epoch, float trainLoss, epochStats_t evalStats) {
     FILE *f = fopen(csvPath, "a");
     if (f) {
         fprintf(f, "%zu,%.6f,%.6f,%.6f\n",
-                epoch + 1, (double)trainLoss, (double)evalLoss, (double)(acc * 100.0));
+                epoch + 1, (double)trainLoss, (double)evalStats.loss,
+                (double)(evalStats.accuracy * 100.0));
         fclose(f);
     }
     printf("  epoch %zu: train_loss=%.4f eval_loss=%.4f test_acc=%.2f%%\n",
-           epoch + 1, (double)trainLoss, (double)evalLoss, (double)(acc * 100.0));
+           epoch + 1, (double)trainLoss, (double)evalStats.loss,
+           (double)(evalStats.accuracy * 100.0));
 }
 
 /* --- Minimaler NPY-Writer (nur little-endian float32). --------------------
@@ -286,12 +287,12 @@ int main(void) {
 
     if (DEPTH_SWEEP_HIDDEN_LAYERS > 0) {
         /* --- Erstes Linear-Layer: Input → Hidden --- */
-        size_t *wd = *reserveMemory(2 * sizeof(size_t));
+        size_t *wd = reserveMemory(2 * sizeof(size_t));
         wd[0] = HIDDEN_DIM; wd[1] = INPUT_DIM;
         tensor_t *wp = tensorInitWithDistribution(XAVIER_UNIFORM, wInputHidden,
                                                    wd, 2, q, NULL, INPUT_DIM, HIDDEN_DIM);
         tensor_t *wg = gradInitFloat(wp, NULL);
-        size_t *bd = *reserveMemory(2 * sizeof(size_t));
+        size_t *bd = reserveMemory(2 * sizeof(size_t));
         bd[0] = 1; bd[1] = HIDDEN_DIM;
         tensor_t *bp = tensorInitWithDistribution(ZEROS, bInputHidden,
                                                    bd, 2, q, NULL, 1, HIDDEN_DIM);
@@ -303,12 +304,12 @@ int main(void) {
 
         /* --- Zwischen-Hidden-Layer (Hidden → Hidden), (N-1) Stueck --- */
         for (int k = 1; k < DEPTH_SWEEP_HIDDEN_LAYERS; k++) {
-            size_t *wd2 = *reserveMemory(2 * sizeof(size_t));
+            size_t *wd2 = reserveMemory(2 * sizeof(size_t));
             wd2[0] = HIDDEN_DIM; wd2[1] = HIDDEN_DIM;
             tensor_t *wp2 = tensorInitWithDistribution(XAVIER_UNIFORM, wHidden[k - 1],
                                                         wd2, 2, q, NULL, HIDDEN_DIM, HIDDEN_DIM);
             tensor_t *wg2 = gradInitFloat(wp2, NULL);
-            size_t *bd2 = *reserveMemory(2 * sizeof(size_t));
+            size_t *bd2 = reserveMemory(2 * sizeof(size_t));
             bd2[0] = 1; bd2[1] = HIDDEN_DIM;
             tensor_t *bp2 = tensorInitWithDistribution(ZEROS, bHidden[k - 1],
                                                         bd2, 2, q, NULL, 1, HIDDEN_DIM);
@@ -321,12 +322,12 @@ int main(void) {
 
         /* --- Output-Layer: Hidden → Output --- */
         int outIdx = DEPTH_SWEEP_HIDDEN_LAYERS;
-        size_t *wdO = *reserveMemory(2 * sizeof(size_t));
+        size_t *wdO = reserveMemory(2 * sizeof(size_t));
         wdO[0] = OUTPUT_DIM; wdO[1] = HIDDEN_DIM;
         tensor_t *wpO = tensorInitWithDistribution(XAVIER_UNIFORM, wOutHidden,
                                                     wdO, 2, q, NULL, HIDDEN_DIM, OUTPUT_DIM);
         tensor_t *wgO = gradInitFloat(wpO, NULL);
-        size_t *bdO = *reserveMemory(2 * sizeof(size_t));
+        size_t *bdO = reserveMemory(2 * sizeof(size_t));
         bdO[0] = 1; bdO[1] = OUTPUT_DIM;
         tensor_t *bpO = tensorInitWithDistribution(ZEROS, bOut,
                                                     bdO, 2, q, NULL, 1, OUTPUT_DIM);
@@ -337,12 +338,12 @@ int main(void) {
                                                  parameterInit(bpO, bgO), q, q, q, q);
     } else {
         /* DEPTH=0 ⇒ direkter Input → Output */
-        size_t *wd = *reserveMemory(2 * sizeof(size_t));
+        size_t *wd = reserveMemory(2 * sizeof(size_t));
         wd[0] = OUTPUT_DIM; wd[1] = INPUT_DIM;
         tensor_t *wp = tensorInitWithDistribution(XAVIER_UNIFORM, wOutDirect,
                                                    wd, 2, q, NULL, INPUT_DIM, OUTPUT_DIM);
         tensor_t *wg = gradInitFloat(wp, NULL);
-        size_t *bd = *reserveMemory(2 * sizeof(size_t));
+        size_t *bd = reserveMemory(2 * sizeof(size_t));
         bd[0] = 1; bd[1] = OUTPUT_DIM;
         tensor_t *bp = tensorInitWithDistribution(ZEROS, bOut,
                                                    bd, 2, q, NULL, 1, OUTPUT_DIM);
@@ -477,16 +478,19 @@ int main(void) {
 
     csvInit();
 
+    lossConfig_t lossConfig = { .funcType = CROSS_ENTROPY, .reduction = REDUCTION_MEAN };
     clock_t t0 = clock();
     trainingRunResult_t res = trainingRun(
-        model, MODEL_SIZE, CROSS_ENTROPY,
+        model, MODEL_SIZE, lossConfig,
         trainDL, testDL, sgd, NUM_EPOCHS,
         calculateGradsSequential, inferenceWithLoss, onEpochEnd);
     clock_t t1 = clock();
 
-    float accuracy = evaluationEpochAccuracy(model, MODEL_SIZE, testDL, NUM_CLASSES, inference);
+    float accuracy = evaluationEpochWithMetrics(
+        model, MODEL_SIZE, CROSS_ENTROPY, testDL, inferenceWithLoss).accuracy;
     printf("Training done in %.2fs. final_train_loss=%.4f final_eval_loss=%.4f accuracy=%.4f%%\n",
            (double)(t1 - t0) / CLOCKS_PER_SEC,
-           (double)res.finalTrainLoss, (double)res.finalEvalLoss, (double)accuracy * 100.0);
+           (double)res.finalTrainLoss, (double)res.finalEvalStats.loss,
+           (double)accuracy * 100.0);
     return 0;
 }

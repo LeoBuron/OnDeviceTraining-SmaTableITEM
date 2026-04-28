@@ -35,7 +35,7 @@ if(${ODT_PREPARE})
     FetchContent_Declare(
             odt
             GIT_REPOSITORY https://github.com/es-ude/OnDeviceTraining
-            GIT_TAG main
+            GIT_TAG develop
     )
 
 
@@ -55,7 +55,7 @@ if(${ODT_PREPARE})
             odt
             QUIET
             GIT_REPOSITORY https://github.com/es-ude/OnDeviceTraining
-            GIT_TAG "main"
+            GIT_TAG "develop"
             GIT_SUBMODULES_RECURSE FALSE
 
             SOURCE_DIR ${CMAKE_SOURCE_DIR}/OnDeviceTraining/src
