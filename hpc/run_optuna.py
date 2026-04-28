@@ -36,6 +36,7 @@ import json
 import multiprocessing as mp
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -227,6 +228,7 @@ def main() -> int:
     study_name = f"{args.rq}--{timestamp}"
     run_dir = args.log_dir / study_name
     run_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(args.search_space, run_dir / "search_space.json")
 
     storage_url = args.storage_url or f"sqlite:///{run_dir / 'study.db'}"
     sqlite_path = _sqlite_path(storage_url)

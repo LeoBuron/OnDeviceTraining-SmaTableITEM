@@ -14,8 +14,26 @@ from pathlib import Path
 
 REFERENCE = Path("data/model_and_dataset/summary.csv")
 FOLD_KEY = "fold"
-NON_COMBO = {"trial", "state", "value", FOLD_KEY, "n_params", "best_epoch", "wall_clock_s",
-             "ckpt_dir"}
+
+
+def resolve_search_space(explicit: Path | None, run_dir: Path) -> Path:
+    """Explicit --search-space wins; else fall back to the copy run_optuna.py
+    drops into the run dir. Exit 2 (not an exception) if neither exists —
+    this is a usage error, not a bug in the run."""
+    if explicit is not None:
+        if not explicit.exists():
+            print(f"--search-space not found: {explicit}", file=sys.stderr)
+            raise SystemExit(2)
+        return explicit
+    fallback = run_dir / "search_space.json"
+    if fallback.exists():
+        return fallback
+    print(
+        "no search-space file found — pass --search-space <path> explicitly, "
+        f"or ensure it was copied to {fallback} by run_optuna.py",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 
 def main() -> int:
@@ -23,15 +41,22 @@ def main() -> int:
     p.add_argument("--run-dir", type=Path, required=True)
     p.add_argument("--config-name", required=True, help="e.g. trial-4223 (reference lookup)")
     p.add_argument("--expect-folds", type=int, default=15)
+    p.add_argument("--search-space", type=Path, default=None,
+                   help="search-space JSON used for this run (defines the combo key). "
+                        "Defaults to <run-dir>/search_space.json.")
     p.add_argument("--out", type=Path, default=Path("stage1_selection.json"))
     args = p.parse_args()
 
+    search_space_path = resolve_search_space(args.search_space, args.run_dir)
+    space_keys = [k for k in json.loads(search_space_path.read_text()) if k != FOLD_KEY]
+
     rows = list(csv.DictReader((args.run_dir / "trials.csv").open()))
+    rows.sort(key=lambda r: int(r["trial"]))
     combos = defaultdict(list)
     for r in rows:
         if r["state"] != "COMPLETE":
             continue
-        key = tuple((k, r[k]) for k in sorted(r) if k not in NON_COMBO)
+        key = tuple((k, r[k]) for k in sorted(space_keys))
         combos[key].append(r)
 
     ref_accs = [float(r["best_val_acc"]) for r in csv.DictReader(REFERENCE.open())
@@ -40,11 +65,24 @@ def main() -> int:
 
     report = []
     for key, rs in sorted(combos.items()):
-        accs = [float(r["value"]) for r in rs]
-        complete = len(rs) == args.expect_folds
+        # GridSampler in distributed mode can schedule the same grid cell
+        # twice; keep the first COMPLETE row (by trial number, already
+        # sorted above) per fold and warn about the rest.
+        by_fold: dict[str, dict] = {}
+        for r in rs:
+            fold = r[FOLD_KEY]
+            if fold in by_fold:
+                print(f"duplicate trial {r['trial']} for fold {fold} ignored "
+                      f"(GridSampler distributed re-run)", file=sys.stderr)
+                continue
+            by_fold[fold] = r
+        deduped = list(by_fold.values())
+
+        accs = [float(r["value"]) for r in deduped]
+        complete = len(deduped) == args.expect_folds
         entry = {
             "params": dict(key),
-            "n_folds": len(rs),
+            "n_folds": len(deduped),
             "complete": complete,
             "mean_acc": st.mean(accs),
             "std_acc": st.stdev(accs) if len(accs) > 1 else 0.0,
@@ -52,12 +90,12 @@ def main() -> int:
             "folds": sorted(
                 ({"fold": int(r[FOLD_KEY]), "accuracy": float(r["value"]),
                   "ckpt": str(args.run_dir / f"trial_{int(r['trial']):05d}" / "ckpt")}
-                 for r in rs), key=lambda d: d["fold"]),
+                 for r in deduped), key=lambda d: d["fold"]),
         }
         report.append(entry)
         flag = "" if complete else "  [INCOMPLETE]"
         print(f"{dict(key)}: mean={entry['mean_acc']:.4f} +/- {entry['std_acc']:.4f} "
-              f"min={entry['min_acc']:.4f} ({len(rs)} folds){flag}")
+              f"min={entry['min_acc']:.4f} ({len(deduped)} folds){flag}")
 
     complete_combos = [e for e in report if e["complete"]]
     if not complete_combos:
