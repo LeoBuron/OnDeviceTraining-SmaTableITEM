@@ -1,0 +1,5 @@
+{
+  "fold": [0],
+  "replay_mode": ["ppca", "exemplar_random", "exemplar_herding", "none"],
+  "buffer_size": [4, 16]
+}

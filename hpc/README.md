@@ -76,6 +76,32 @@ The aggregator refuses to merge studies whose search-space *key sets* differ (va
 
 `stage1_pretrain`'s RESULT line carries 23 keys total: the 19 base keys (accuracy/params/wall-clock, the 7-term static `mem_*_b` budget — params+grads+optstate+act+gradbuf+io+masks — plus RSS/CPU milestones and `stack_peak_b`, measured via upstream `measurePeakStackBytes`), and 4 heap-counter keys (`mem_heap_peak_b`, `mem_dataset_heap_b`, `mem_model_heap_b`, `mem_reconciliation_gap_b`) gated by the `ODT_MEM_PROFILE` CMake flag — all four print 0 on a binary built without it. `hpc/build_all_rqs.sh` now passes `-DODT_MEM_PROFILE=ON` by default. `mem_mcu_total_b` (static budget) plus `stack_peak_b` (measured) against the RP2350's 520 KB SRAM is the on-device feasibility figure.
 
+### RQ1: replay-buffer sweep
+
+`rq1_replay_buffer` has its own build-and-timeout requirements, found during a
+pre-flight audit before the first real Amplitude submission:
+
+- **Build with `HOST-Release`, not `HOST-Debug`.** `hpc/build_all_rqs.sh`
+  already does this by default. At real dataset scale (WF≈4000), the PPCA
+  arm's per-class absorption (a Jacobi eigendecomposition, O(p^3) per merge
+  call) is expensive enough under `-O0` that even the cheapest arm (`none`,
+  no PPCA at all) came within a hair of a 300s timeout — `-O2` alone brought
+  every arm comfortably under it. `DEBUG_MODE_ERROR` stays on regardless
+  (set unconditionally in `host_post.cmake`, independent of build type), so
+  `PRINT_ERROR` diagnostics aren't lost by switching.
+- **`TRIAL_TIMEOUT_S=1200`** (20 min) for all three rq1 search spaces
+  (`rq1_replay_buffer.json`, `rq1_ppca_rank_sweep.json`,
+  `rq1_chunk_size_sweep.json`). Measured worst case with the `HOST-Release`
+  build: 389s (`ppca` at `ODT_MAX_SESSION_SAMPLES=512`, the chunk-size
+  sweep's most expensive point) — 1200s gives >3x margin uniformly across
+  all three.
+- **`DATASET_DIR` must point at a dataset with all 15 LOSO folds.** The
+  search spaces sweep `fold: 0..14`; a dataset prepared with a smaller
+  subject cohort (e.g. the synthetic smoke-test set) silently fails
+  `smatableDatasetOpen` on the missing folds and Optuna prunes those trials
+  rather than erroring loudly. Verify fold coverage before submitting:
+  `ls $DATASET_DIR/folds/LOSO | grep -c train.npy` should print `15`.
+
 ## On Amplitude
 
 ```bash
@@ -109,7 +135,7 @@ Each binary in `hpc/bin/<rq>.host` is a self-contained executable that:
 
 1. reads env: `SMATABLE_DATA_DIR`, `SMATABLE_FOLD_SCHEME`, `SMATABLE_FOLD`,
    `ODT_*` hyperparams (RQ-specific keys: `ODT_LR`, `ODT_EPOCHS`,
-   `ODT_HIDDEN`, `ODT_SEED`, `ODT_REPLAY_BUFFER_SIZE`, …),
+   `ODT_HIDDEN`, `ODT_SEED`, `ODT_BUFFER_SIZE`, `ODT_REPLAY_MODE`, …),
 2. prints `BEGIN <rq> <iso8601>` to stdout,
 3. prints `EPOCH <e> train_loss=<f> train_acc=<f> val_loss=<f> val_acc=<f>`
    per epoch,
@@ -118,8 +144,11 @@ Each binary in `hpc/bin/<rq>.host` is a self-contained executable that:
 5. exits 0 on success, non-zero on failure (Optuna marks failed trials
    pruned and continues).
 
-Stubs `rq1..rq5` print `RESULT skipped` until upstream Conv1d/LayerNorm
-land — see the spec's "Step 4 — deferred work".
+Conv1d/LayerNorm/GroupNorm all landed upstream at the current pin (7d7f1d5),
+so this blocker is resolved. `rq1_replay_buffer` is implemented (three-arm
+PPCA/exemplar replay comparison, see `experiments/rq1-replay-buffer/README.md`).
+Stubs `rq2..rq5` still print `RESULT skipped` pending their own per-RQ
+training-loop design — see the spec's "Step 4 — deferred work".
 
 ## HOST↔MCU equivalence layers
 

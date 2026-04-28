@@ -73,6 +73,16 @@
             }
         },
         {
+            "name": "HOST-Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "ODT_TARGET": "HOST"
+            }
+        },
+        {
             "name": "PREPARE",
             "cacheVariables": {
                 "ODT_TARGET": "NONE",
@@ -114,6 +124,10 @@
         {
             "name": "HOST-Debug",
             "configurePreset": "HOST-Debug"
+        },
+        {
+            "name": "HOST-Release",
+            "configurePreset": "HOST-Release"
         },
         {
             "name": "PREPARE",

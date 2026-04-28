@@ -4,7 +4,7 @@ One subdirectory per research question. Layout matches the planned tree in the t
 
 | Dir | RQ | Sprint window | Status |
 |---|---|---|---|
-| `rq1-replay-buffer/` | RQ1 — replay-buffer sizing curve (random vs herding) for original-user retention | D10–D12 (01.–03.05) | pending |
+| `rq1-replay-buffer/` | RQ1 — replay-buffer sizing curve (ppca vs random vs herding vs none) for original-user retention | D10–D12 (01.–03.05) | plumbing complete |
 | `rq2-unseen-user/` | RQ2 — unseen-user fine-tuning sample-count sweep (LOOCV) | D13–D14 (04.–05.05) | pending |
 | `rq3-new-gesture/` | RQ3 — new-gesture sample-count × contributor-count sweep | D15 (06.05) | pending |
 | `rq4-stability/` | RQ4 — on-device training stability across ≥ 3 seeds; init vs data-order variance decomposition | D8–D9 (29.–30.04) | pending |

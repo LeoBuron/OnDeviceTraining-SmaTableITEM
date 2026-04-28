@@ -35,16 +35,23 @@ echo "Submit dir: ${SLURM_SUBMIT_DIR}"
 # ---- configuration -------------------------------------------------------
 
 RQ="${RQ:-rq0_toy_synthetic}"
+# Decouple binary name from study tag: a single dataset-agnostic binary like
+# rq0_toy_synthetic.host can run against multiple search-spaces / datasets
+# (synthetic vs real LOSO). Override HOST_BIN_NAME to point at a different
+# binary while RQ still picks the search-space + log-dir tag.
+HOST_BIN_NAME="${HOST_BIN_NAME:-${RQ}}"
 N_WORKERS="${N_WORKERS:-32}"
 TRIAL_TIMEOUT_S="${TRIAL_TIMEOUT_S:-300}"
 FOLD_SCHEME="${FOLD_SCHEME:-LOSO}"
 
 IMAGE="${SLURM_SUBMIT_DIR}/hpc/run_container.sif"
-HOST_BIN_REL="hpc/bin/${RQ}.host"
+HOST_BIN_REL="hpc/bin/${HOST_BIN_NAME}.host"
 HOST_BIN="${SLURM_SUBMIT_DIR}/${HOST_BIN_REL}"
 SEARCH_SPACE_REL="hpc/search_space/${RQ}.json"
 SEARCH_SPACE="${SLURM_SUBMIT_DIR}/${SEARCH_SPACE_REL}"
-DATASET_SRC="${HPC_HOME}/data/smatable"
+# Default dataset is the canonical synthetic toy; override DATASET_DIR for
+# real LOSO runs (e.g. DATASET_DIR=${HPC_HOME}/data/smatable-real).
+DATASET_SRC="${DATASET_DIR:-${HPC_HOME}/data/smatable}"
 FINAL_LOG_DIR="${HPC_HOME}/experiments"
 
 WS_NAME="smatable-ws"

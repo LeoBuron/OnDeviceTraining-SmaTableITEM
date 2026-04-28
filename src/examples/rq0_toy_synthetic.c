@@ -161,8 +161,9 @@ int main(void) {
         &lq);
     model[3] = softmaxLayerInit(&lq);
 
-    optimizer_t *sgd =
-        sgdMCreateOptim(lr, 0.f, 0.f, model, MODEL_SIZE, FLOAT32, quantizationInitFloat());
+    optimizer_t *sgd = sgdMCreateOptim(
+        lr, 0.f, 0.f, model, MODEL_SIZE, quantizationInitFloat(),
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
 
     size_t n_params = (size_t)hidden * WF + (size_t)hidden + (size_t)hidden * NC + NC;

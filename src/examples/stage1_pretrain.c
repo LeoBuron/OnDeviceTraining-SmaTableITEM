@@ -23,15 +23,6 @@
 
 #define SOURCE_FILE "stage1_pretrain"
 
-/* GroupNorm(1,C) is the reference norm; GroupNorm landed upstream main
- * 3e768c7, so it is now the default. STAGE1_USE_GROUPNORM=0 keeps the
- * LayerNorm([C, L]) fallback available for A/B work — identical
- * normalization statistics, per-element affine instead of per-channel.
- * Plumbing-equivalent; NOT the paper configuration (extra affine params). */
-#ifndef STAGE1_USE_GROUPNORM
-#define STAGE1_USE_GROUPNORM 1
-#endif
-
 #include <errno.h>
 #include <math.h>
 #include <stdbool.h>
@@ -52,11 +43,7 @@
 #include "DataLoaderApi.h"
 #include "DropoutApi.h"
 #include "FlattenApi.h"
-#if STAGE1_USE_GROUPNORM
 #include "GroupNormApi.h"
-#else
-#include "LayerNormApi.h"
-#endif
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -330,20 +317,10 @@ static size_t buildModel(layer_t **model, layerQuant_t *lq, const size_t *widths
         snprintf(base, sizeof(base), "features.%zu.pointwise", i);
         regParam(base, model[m - 1]->config->conv1d->weights, NULL);
 
-#if STAGE1_USE_GROUPNORM
         model[m++] = groupNormLayerInit(&(groupNormInit_t){.numGroups = 1, .numChannels = w}, lq);
         snprintf(base, sizeof(base), "features.%zu.norm", i);
         regParam(base, model[m - 1]->config->groupNorm->gamma,
                  model[m - 1]->config->groupNorm->beta);
-#else
-        model[m++] = layerNormLayerInit(
-            &(layerNormInit_t){
-                .normalizedShape = (size_t[]){w, L}, .numNormDims = 2, .eps = 1e-5f},
-            lq);
-        snprintf(base, sizeof(base), "features.%zu.norm", i);
-        regParam(base, model[m - 1]->config->layerNorm->gamma,
-                 model[m - 1]->config->layerNorm->beta);
-#endif
 
         model[m++] = reluLayerInit(lq);
         model[m++] = maxPool1dLayerInit(
@@ -401,12 +378,8 @@ static size_t countParams(void) {
 }
 
 /* ---- Layer A: exact model accounting (bytes; spec 2026-07-02-memory-time-probes) ----
- * Toggle-agnostic: this accounting walks the live g_params registry and
- * replays calcOutputShape, so it is correct as-is for either norm build
- * (STAGE1_USE_GROUPNORM 0 or 1, see the file-header comment) — GroupNorm(1,C)
- * and the LayerNorm([C,L]) fallback register different param/grad tensor
- * counts (per-channel vs per-element affine), and whichever is actually
- * compiled in is what g_params holds when this runs. */
+ * Walks the live g_params registry and replays calcOutputShape, so it stays
+ * correct without a separate accounting path per layer type. */
 typedef struct memBudget {
     size_t params, grads, optstate, act, gradbuf, io, masks, mcuTotal, datasetHost;
 } memBudget_t;
@@ -813,8 +786,9 @@ int main(void) {
         return 0;
     }
 
-    optimizer_t *sgd = sgdMCreateOptim(lr0, momentum, weightDecay, model, modelSize, FLOAT32,
-                                       quantizationInitFloat());
+    optimizer_t *sgd = sgdMCreateOptim(
+        lr0, momentum, weightDecay, model, modelSize, quantizationInitFloat(),
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     size_t heapAfterOpt = memProfileMark();
     optimizerFunctions_t optimFns = optimizerFunctions[SGD_M];
 #if MEM_PROBE_AVAILABLE

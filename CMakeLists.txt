@@ -35,8 +35,9 @@ if(${ODT_PREPARE})
     FetchContent_Declare(
             odt
             GIT_REPOSITORY https://github.com/es-ude/OnDeviceTraining
-            # pinned: upstream main with GroupNorm + bias-less-conv optimizer fix
-            GIT_TAG 3e768c7
+            # pinned: upstream main with PPCA continual-learning replay (#326),
+            # AdamW/LR-schedulers, and the F8 inferenceStats heap-overflow fix
+            GIT_TAG 7d7f1d5
     )
 
 
@@ -56,8 +57,9 @@ if(${ODT_PREPARE})
             odt
             QUIET
             GIT_REPOSITORY https://github.com/es-ude/OnDeviceTraining
-            # pinned: upstream main with GroupNorm + bias-less-conv optimizer fix
-            GIT_TAG "3e768c7"
+            # pinned: upstream main with PPCA continual-learning replay (#326),
+            # AdamW/LR-schedulers, and the F8 inferenceStats heap-overflow fix
+            GIT_TAG "7d7f1d5"
             GIT_SUBMODULES_RECURSE FALSE
 
             SOURCE_DIR ${CMAKE_SOURCE_DIR}/OnDeviceTraining/src
@@ -91,6 +93,9 @@ set(ODT_LIBS
     StorageApi DataLoader DataLoaderApi
     # arithmetic / misc (needed by GroupNorm + LayerConfigAccess pulled in at 3e768c7)
     ArithmeticType ExecuteOp Reduce LayerConfigAccess MemProfile
+    # continual learning: PPCA generative replay (#326, pulled in at 7d7f1d5)
+    PpcaReplay PpcaReplaySerialize PpcaReplayApi
+    DTypes Matmul Axpby RowBroadcast JacobiEig Sub Add Mul MinMax Serialize Deserialize
 )
 
 set(ODT_LIBS_HOST_EXTRA NPYLoader NPYLoaderApi CSVHelper)

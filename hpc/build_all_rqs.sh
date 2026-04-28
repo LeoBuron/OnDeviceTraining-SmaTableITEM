@@ -30,13 +30,18 @@ fi
 
 for rq in "${RQS[@]}"; do
     echo "==> building ${rq}"
-    # ODT_MEM_PROFILE=ON: turns on StorageApi's heap high-water counter (a
-    # relaxed atomic add per reserveMemory call) so production sweep binaries
-    # carry mem_heap_peak_b/mem_reconciliation_gap_b — overhead is negligible
-    # next to training time.
-    cmake --preset HOST-Debug -DODT_EXAMPLE="${rq}" -DODT_MEM_PROFILE=ON >/dev/null
-    cmake --build --preset HOST-Debug --target HOST >/dev/null
-    cp -f "${ROOT}/build/HOST-Debug/HOST" "${BIN_DIR}/${rq}.host"
+    # HOST-Release (-O2, DEBUG_MODE_ERROR still on -- that define is set
+    # unconditionally in host_post.cmake, independent of CMAKE_BUILD_TYPE):
+    # these binaries run real Optuna sweeps, and -O0 (HOST-Debug) is slow
+    # enough on math-heavy examples (e.g. rq1_replay_buffer's PPCA merge) to
+    # risk blowing per-trial timeouts. ODT_MEM_PROFILE=ON: turns on
+    # StorageApi's heap high-water counter (a relaxed atomic add per
+    # reserveMemory call) so production sweep binaries carry
+    # mem_heap_peak_b/mem_reconciliation_gap_b -- overhead is negligible next
+    # to training time.
+    cmake --preset HOST-Release -DODT_EXAMPLE="${rq}" -DODT_MEM_PROFILE=ON >/dev/null
+    cmake --build --preset HOST-Release --target HOST >/dev/null
+    cp -f "${ROOT}/build/HOST-Release/HOST" "${BIN_DIR}/${rq}.host"
     echo "    -> ${BIN_DIR}/${rq}.host"
 done
 

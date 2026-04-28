@@ -50,6 +50,12 @@ src/examples/data/*-ubyte
 /hpc/run_container.sif.*
 # SmaTable canonical buffer + folds (regenerable via tools/prep_smatable.py).
 /data/smatable/
+/data/smatable-real/
 # Amplitude test-script transient logs (and any other .log files anywhere).
 /scripts/amplitude/logs/
 *.log
+/data/model_and_dataset/
+/data/models_and_datasets.zip
+/.superpowers/
+/data/smatable-trial-*/
+.DS_Store
