@@ -24,8 +24,23 @@
 | S5 | `freeTensor` aborts on user-owned buffers | Documented footgun | Low |
 | S6 | `snprintf` between `init()` and `trainingRun()` → latent `exit(1)` | Latent memory bug | Medium |
 | F7 | `tensorInit` INT32 path treats input as `float*` → destroys int32 inputs from NPYLoader | **CONFIRMED — bug** | High (silent) |
+| F8 | `reserveInferenceStats` sizes the stats output from the label's rank → heap overflow (found 2026-07 via `ODT_MEM_PROFILE`) | **CONFIRMED — bug** | High (fatal under `ODT_MEM_PROFILE`) |
+| F9 | `MemProfile` hard-requires pthreads (`find_package(Threads REQUIRED)` + unconditional `<pthread.h>`) → every MCU cross-build fails at configure (found 2026-09-03) | **CONFIRMED — build blocker** | High (blocks RP2350 bring-up) |
 
 Two High-priority findings drive Plan 3 issue-filing: **F1 (CE-gradient 32× scaling)** — the primary divergence source behind the Phase-5e FAILs — and **F2 (DataLoader indices under-init)** — a surprise bonus bug surfaced during H3 that silently caps per-epoch unique samples at ~3% of the dataset on every ODT training run in every example in this repo.
+
+**Status at the current vendored pin (upstream `main` `7d7f1d5`, 2026-07-15; table added 2026-09-03):**
+
+| # | Status |
+|---|---|
+| F1 | **Fixed upstream** at `3e768c7`: the training loop applies `computeMeanScaleCE` (1/batch) via `scaleOptimizerGradients` when `backwardReduction == REDUCTION_MEAN`; the fused CE backward itself still emits raw `softmax − target`. |
+| F2 | **Fixed upstream** at `3e768c7`: `indices[]` is allocated and filled to the full dataset size. |
+| F7 | **Still open.** Workaround `readInt32NpyDirect` in `src/dataset/smatable_dataset_npy.c` stays until the INT32 `tensorInit` successor path is audited. |
+| F8 | **Fixed upstream** at `7d7f1d5` (commit `61d9cb4`): the stats shape is now derived from the produced output. |
+| F9 | **Open.** No MCU target configures at `7d7f1d5`; see the F9 section at the end of this document for the two-part cause and the fix options. |
+| S1–S6 | Not re-audited after the factory-API migration; the MNIST examples they were found in no longer build at this pin. |
+
+The Phase-5e FAILs in `docs/phase5e-failures.md` were measured under F1 + F2 and were not repeated after the fixes.
 
 ---
 
@@ -90,6 +105,8 @@ files directly via `openNPYFile + readHeader + fread` (function
 
 ## Finding F1: CE-gradient lacks batch-size normalization (High Priority)
 
+> **Status 2026-09-03: fixed upstream at `3e768c7`** (see the status table in the Summary). The text below describes the pre-fix behaviour and the measurements that found it.
+
 **Kategorie:** Bug / Silent Numerical Semantics.
 
 **Was:** `crossEntropySoftmaxBackwardFloat` in `OnDeviceTraining/src/src/loss_functions/CrossEntropy.c:57-67` computes `lossGrad[i] = softmaxOutputFloat[i] - distributionFloat[i]` element-wise over all `batch × num_classes` entries with **no division by `batch_size`**. When the loss function is CE with SGD, the gradient magnitude passed to the optimizer is `batch_size` times PyTorch's `F.nll_loss(..., reduction='mean')`-driven gradient. Therefore the **effective learning rate at the optimizer is `batch_size × user_lr`**.
@@ -121,6 +138,8 @@ The factor is exactly `batch_size = 32`. Full numbers in `runs/audit1/h1_result.
 ---
 
 ## Finding F2: DataLoader `indices[]` under-initialized (High Priority, bonus)
+
+> **Status 2026-09-03: fixed upstream at `3e768c7`** (see the status table in the Summary). The text below describes the pre-fix behaviour and the measurements that found it.
 
 **Kategorie:** Bug / Silent Training Semantics. **Not part of the original H1-H5 hypothesis set**; surfaced during Task 5 (H3) close-reading of the DataLoader code path.
 
@@ -333,3 +352,41 @@ Observed during Plan 1.5 development: a `snprintf` call (or `gmtime_r`) placed b
   shape (`getShapeLike(output->shape)`) or fail fast on rank mismatch inside
   `copyShape`. Related doc divergence: `loss.md` calls B=1 outputs "[F]
   implicit" while the runtime always produces rank >= 2.
+
+---
+
+## F9 — `MemProfile` has no bare-metal guard: MCU configure fails under pico-sdk, and the source does not compile for newlib (surfaced 2026-09-03)
+
+**Kategorie:** Build blocker / missing platform guard (upstream), masked by upstream CI.
+
+**Was (two layers):**
+
+1. *Configure.* `OnDeviceTraining/src/src/userApi/CMakeLists.txt:8-11`:
+
+   ```cmake
+   add_library(MemProfile MemProfile.c)
+   find_package(Threads REQUIRED)
+   target_link_libraries(MemProfile PRIVATE Threads::Threads)
+   ```
+
+   Under this repo's `PICO2_W` preset (pico-sdk toolchain, executable try-compiles) `FindThreads` links a probe, finds no `pthread_create`, and aborts the configure of *every* example:
+
+   ```
+   CMake Error at .../FindThreads.cmake:289 (find_package_handle_standard_args):
+     Could NOT find Threads (missing: Threads_FOUND)
+   Call Stack: OnDeviceTraining/src/src/userApi/CMakeLists.txt:10 (find_package)
+   ```
+
+   Reproduced with `cmake --preset PICO2_W -DODT_EXAMPLE=rq0_toy_synthetic` (an example that uses nothing from `MemProfile`). `PICO1` and the three STM32 presets share the toolchain and run into the same check.
+
+2. *Compile.* `MemProfile.c` includes `<pthread.h>` unconditionally, calls `pthread_attr_init` / `pthread_attr_setstack` / `pthread_create` / `pthread_join` / `pthread_attr_destroy` (`MemProfile.c:34-55`) and reads `ru_maxrss` (`:84`). Under `arm-none-eabi` newlib none of these exist: five `-Werror=implicit-function-declaration` errors plus `'struct rusage' has no member named 'ru_maxrss'`. Reproduced with upstream's own `arm_cross` preset (`cmake -S OnDeviceTraining/src --preset arm_cross -B <dir>`, then `cmake --build <dir> --target MemProfile`).
+
+**Why upstream CI does not catch it:** `cmake/arm-none-eabi.cmake` sets `CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY`, so `FindThreads`' "pthread_create in pthreads" probe compiles without linking and reports `Found Threads: TRUE` — the configure passes there. The `c-arm-cross-compile` job is marked non-required; whether it builds the `MemProfile` target at all was not checked here.
+
+**Wirkung:** No MCU binary — including the L3 equivalence probe and every on-device measurement the paper claims — can be built at the current pin. This repo's top-level `CMakeLists.txt:95` also lists `MemProfile` in the shared `ODT_LIBS`, so even a passing configure would try to link it on MCU.
+
+**Fix-Optionen:**
+1. *Upstream (preferred — the pthread stack-paint is host-only by nature):* in `userApi/CMakeLists.txt`, `find_package(Threads)` without `REQUIRED` and build `MemProfile` only `if(Threads_FOUND AND NOT CMAKE_SYSTEM_NAME STREQUAL "Generic")` — or keep the target and give `MemProfile.c` an `#if defined(__unix__) || defined(__APPLE__)` host path plus a bare-metal path (`measurePeakStackBytes` → paint-and-scan of the current stack, or a no-op returning 0; `memProfileRssPeakKb` → 0). The heap counter (`StorageApi`, no pthread) stays available everywhere. Add `MemProfile` to the `arm_cross` build so CI actually exercises it.
+2. *Repo-local (until the upstream fix is pinned):* drop `MemProfile` from `ODT_LIBS` on MCU platforms, mark the upstream target `EXCLUDE_FROM_ALL` there, ship a `FindThreads.cmake` shim on `CMAKE_MODULE_PATH` for the pico/stm32 presets that defines an empty `Threads::Threads` INTERFACE target, and `#ifdef`-guard the `measurePeakStackBytes` / `memProfileRssPeakKb` call sites in `stage1_pretrain.c`.
+
+**Status:** open. Tracked in `docs/paper-plan.md` "Current state" as the first item of the RP2350 bring-up.

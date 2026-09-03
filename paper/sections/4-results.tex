@@ -1,0 +1,29 @@
+\section{Results}
+\label{sec:results}
+
+\subsection{Memory feasibility on the RP2350}
+\label{sec:results-memory}
+\input{tables/memory-feasibility}
+
+Three of the four configurations fit the RP2350's 520\,KB SRAM with headroom; the most accurate configuration (trial-3408, 0.904 reference accuracy) does not: its activation and stack footprint scales with width\,$\times$\,$T$ and exceeds the budget by roughly $3.8\times$. \todo{Confirm the host-side estimates on the device (peak SRAM via painted stack + linker map) before this becomes a claim; keep the host numbers as the estimate column.}
+
+\subsection{Stage 1: LOSO pretraining in C}
+\result{Per-architecture LOSO mean $\pm$ std over 15 folds vs.\ the PyTorch/Adam reference; V3 gate. Local pilot (trial-3650, single LR point 0.1, 250 epochs): 0.7205 $\pm$ 0.0898 vs.\ 0.7045 reference.}
+
+\subsection{RQ1: replay sizing at matched memory}
+\result{Accuracy on original users vs.\ bytes per class, four arms, error bars from the seed axis; BWT; new-user accuracy as a sanity check. Secondary: PPCA rank sensitivity; absorption chunk-size sensitivity (cost curve).}
+
+\subsection{RQ2: unseen-user sample efficiency}
+\result{Target-user accuracy vs.\ $K$; original-user retention; FWT at $K=0$.}
+
+\subsection{RQ3: new-gesture sample efficiency}
+\result{New-class accuracy vs.\ samples per contributor $\times$ contributors; old-class retention floor.}
+
+\subsection{RQ4: on-device training stability}
+\result{Std-dev across seeds; variance shares init vs.\ data order.}
+
+\subsection{RQ5: noise augmentation}
+\result{$\Delta$ accuracy at matched budget, aug on vs.\ off.}
+
+\subsection{On-device measurements}
+\result{Inference latency, fine-tune step latency, energy per inference / per epoch, peak SRAM on the RP2350; RP2040 companion numbers if available; HOST$\leftrightarrow$MCU single-step parity (L3).}

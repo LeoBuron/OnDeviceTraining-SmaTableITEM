@@ -1,0 +1,19 @@
+\section{System and Experimental Setup}
+\label{sec:system}
+
+\subsection{Classifier and training framework}
+The classifier is the SmaTable \emph{DepthwiseCNN} of Hettstedt et al.~\cite{hettstedt2026smatable}: per block a depthwise \texttt{Conv1d} (kernel $k$, dilation $d$, same padding, no bias), a pointwise $1\times1$ convolution (no bias), \texttt{GroupNorm}(1, $C$), ReLU, \texttt{MaxPool1d}(2) and dropout; the head is adaptive average pooling, a 16-unit linear layer with ReLU and dropout, and a 6-way linear output. Four architecture configurations from the original search are used unchanged (Table~\ref{tab:archs}). \todo{Table~\ref{tab:archs}: trial id, widths, $k$, $d$, dropout, window length $T$, parameter count, PyTorch/Adam LOSO reference accuracy: 2353 (4; 7; 3; 0.1; 1250; 234; 0.618), 3408 (32,8,16,16,8; 23; 1; 0.1; 1250; 3050; 0.904), 3650 (8,8; 5; 2; 0.0; 250; 434; 0.705), 4223 (8,12,8; 7; 3; 0.0; 625; 694; 0.811).}
+
+All training runs use the OnDeviceTraining (ODT) C library~\cite{odt2026} at a pinned revision. The HOST build of the library is bit-equivalent to the MCU build, so hyper-parameter search runs as thousands of HOST processes on a cluster and only the selected configurations are re-executed on the device. Training is FP32 SGD with momentum, cosine learning-rate schedule and best-epoch snapshot; Adam is excluded because its two extra state buffers per parameter do not fit the memory budget. \todo{Cite/describe the parity gates: rebuilt PyTorch model reproduces the reference confusion matrices exactly (V0); prediction and gradient parity vs.\ PyTorch at float32 precision on all four architectures (V1/V2); checkpoint round-trip bitwise (V4); LOSO mean within 3\,pp of the Adam reference (V3).}
+
+\subsection{Hardware}
+\todo{RP2350 (dual Cortex-M33, FPU, 520\,KB SRAM) as the primary target; RP2040 (dual Cortex-M0+, no FPU, 264\,KB SRAM) as the portability companion. Timing via the DWT cycle counter; energy via the bench power measurement. Describe the UART dump path used for the HOST$\leftrightarrow$MCU single-step equivalence check (L3).}
+
+\subsection{Dataset and protocol}
+\todo{15 subjects, 6 gestures (knock, tap, swipe-down/up/left/right), 8\,999 preprocessed windows of 4 channels; $T$ per configuration; leave-one-subject-out (15 folds). Two-domain protocol for RQ1: domain 0 = pooled original users (fold's train split), domain 1 = held-out user (fold's test split); pretrain on domain-0-fit, snapshot domain-0-held accuracy, fine-tune on domain-1-fit with replay, re-evaluate. BWT $=$ acc$_\text{after}$ $-$ acc$_\text{before}$ (GEM, two domains). Data availability statement: \todo{agree wording with F.~Hettstedt}.}
+
+\subsection{Replay mechanisms and the iso-byte budget}
+\todo{Exemplar buffer (random / herding) vs.\ per-class PPCA generator (mean, $k$ basis vectors, $k$ eigenvalues, $\sigma^2$). Budget axis = bytes per class; for PPCA the rank is derived as $k = \text{buffer\_size} - 1$ and the achieved bytes and iso-exemplar count are logged per run rather than assumed.}
+
+\subsection{Search infrastructure}
+\todo{Optuna GridSampler with the CV fold as a grid dimension; SQLite-WAL storage on node-local tmpfs; Apptainer container on the amplitUDE Slurm cluster; per-trial timeouts; trial counts per study.}

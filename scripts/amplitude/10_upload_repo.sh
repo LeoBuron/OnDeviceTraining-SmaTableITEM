@@ -2,7 +2,9 @@
 # WHERE: LOCAL Mac (not Amplitude).
 # WHAT:  rsync this repo to Amplitude under ~/projects/OnDeviceTraining-SmaTableITEM.
 # WHY:   Pushes only source — excludes build artifacts, vendored deps,
-#        pre-built binaries, generated dataset, and .jj internals.
+#        pre-built binaries, ALL of data/ (datasets go via 11_upload_dataset.sh
+#        or the explicit rsync in docs/runbook-stage1-amplitude.md), and .jj
+#        internals.
 # COST:  ~10–60 s depending on uplink.
 #
 # Override target host via env. Default is gateway.amplitude.uni-due.de —
@@ -28,7 +30,8 @@ rsync -av --human-readable \
     --exclude=build \
     --exclude=hpc/bin \
     --exclude=hpc/run_container.sif \
-    --exclude=data/smatable \
+    --exclude=data \
+    --exclude=paper/build \
     --exclude=pico-sdk \
     --exclude=OnDeviceTraining \
     --exclude=runs \

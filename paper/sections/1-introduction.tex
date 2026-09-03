@@ -1,0 +1,27 @@
+\section{Introduction}
+\label{sec:intro}
+
+% Outline (from docs/paper-plan.md "Why this paper, why now"):
+% 1. SmaTable: hidden piezo sensors in a table surface, privacy-by-design gesture input.
+% 2. Deployment exposes three continual-learning questions the literature does not answer
+%    for this system: user adaptation budget, new-gesture budget, replay budget.
+% 3. Hettstedt et al. 2026 established the DAQ chain on the RP2350 but inference and
+%    training stayed on a PC; Yoshida 2023a/b are PC-class and need calibration data to
+%    leave the device.
+% 4. This paper: first on-RP2350 inference + training measurements, and quantitative
+%    sample-budget / stability envelopes for three CL scenarios.
+
+\todo{Motivation paragraph: SmaTable concept and why on-device training matters for it (privacy: calibration data must not leave the table).}
+
+\todo{Gap paragraph: prior SmaTable work \cite{hettstedt2026smatable,yoshida2023a,yoshida2023b} keeps training on a PC; no on-device numbers exist.}
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item \textbf{Replay sizing curve (RQ1).} Accuracy on the original users as a function of per-class replay memory under three replay mechanisms at matched bytes per class --- random exemplars, herding exemplars~\cite{rebuffi2017icarl}, and PPCA generative replay~\cite{tipping1999ppca} --- plus a no-replay floor, measured on-device on the RP2350.
+  \item \textbf{User-adaptation sample curve (RQ2).} Accuracy on an unseen user as a function of the number of that user's samples used for on-device fine-tuning, under leave-one-subject-out cross-validation, reporting target-user gain, original-user retention and forward transfer~\cite{lopezpaz2017gem}.
+  \item \textbf{New-gesture sample curve (RQ3).} Accuracy on one added gesture class as a function of samples per contributor $\times$ number of contributors, while bounding degradation on the pre-existing classes.
+  \item \textbf{On-device training stability (RQ4).} Run-to-run variance of final accuracy across seeds, decomposed into new-parameter initialisation and on-device data order.
+  \item \textbf{Augmentation effect (RQ5).} Whether additive Gaussian noise reduces the sample budgets of RQ1/RQ2 at matched accuracy.
+\end{enumerate}
+
+\todo{One sentence on what is explicitly \emph{not} claimed: framework additions (Conv1d, LayerNorm, GroupNorm, PPCA replay in the ODT library) are enablers; architecture is fixed; no QPU.}

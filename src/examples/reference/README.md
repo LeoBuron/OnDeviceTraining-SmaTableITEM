@@ -1,5 +1,7 @@
 # PyTorch Reference Comparisons (Phase 5e)
 
+> **Stand 2026-09-03.** Die hier gelisteten MNIST-/Linear-Regression-Examples bauen am aktuellen ODT-Pin (`7d7f1d5`) nicht mehr (Pre-Factory-API); die Skripte bleiben als Audit-Beleg der Phase 5e. Die aktuellen Paritäts-Gates für den SmaTable-Trainer `stage1_pretrain` liegen unter `tools/`: `verify_reference.py` (V0), `stage1_reference.py` + `compare_stage1_parity.py` (V1/V2), `check_ckpt_roundtrip.py` (V4).
+
 Diese Skripte vergleichen ODT-Examples gegen PyTorch-Referenzen mit N=5 Seeds
 und 2σ-Acceptance-Kriterium.
 

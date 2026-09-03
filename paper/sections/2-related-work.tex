@@ -1,0 +1,11 @@
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{SmaTable and surface-vibration gesture recognition.}
+\todo{Hettstedt et al. 2026 \cite{hettstedt2026smatable}: RP2350 + 9-channel piezo AFE, 4 of 9 channels used, 1\,kHz sampling, 15 users $\times$ 10 sessions $\times$ 10 repetitions $\times$ 6 gestures = 9\,000 events; 1D-SepCNN with 8\,722 parameters, 97.32\,\% 5-fold top-1 offline. Only the DAQ stage runs on the MCU. Yoshida 2023a/b (NAIST) \cite{yoshida2023a,yoshida2023b}: PC-class; 0.90 accuracy under LOPOCV with one calibration session, calibration data leaves the device.}
+
+\paragraph{Replay-based continual learning.}
+\todo{Catastrophic forgetting \cite{mccloskey1989catastrophic}; exemplar replay and herding selection \cite{rebuffi2017icarl}; GEM's backward/forward-transfer metrics \cite{lopezpaz2017gem}; regularisation alternatives EWC \cite{kirkpatrick2017ewc} and LwF \cite{li2018lwf} (out of scope here, replay-only). Generative replay with per-class probabilistic PCA \cite{tipping1999ppca}: one Gaussian generator per class, $O((k+1)\,d)$ memory, constant in the number of absorbed domains.}
+
+\paragraph{On-device training on microcontrollers.}
+\todo{TinyML on-device training literature to cite (survey + 2--3 systems); position ODT (\texttt{es-ude/OnDeviceTraining}) \cite{odt2026} as a C library whose HOST build is bit-equivalent to the MCU build, which is what makes a supercomputer sweep transferable to the device.}

@@ -81,7 +81,10 @@ else
 fi
 
 JOB_SCRATCH="${WS_PATH}/jobs/${SLURM_JOB_ID}"
-DATA_CACHE="${WS_PATH}/datasets/smatable"
+# One cache dir PER DATASET (keyed by the source dir's basename). A single
+# shared cache silently reused the first campaign's dataset for every later
+# submission with a different DATASET_DIR (stage 1 runs four trial datasets).
+DATA_CACHE="${WS_PATH}/datasets/$(basename "${DATASET_SRC}")"
 LOG_DIR="${JOB_SCRATCH}/logs"
 mkdir -p "${JOB_SCRATCH}" "${LOG_DIR}" "${WS_PATH}/datasets"
 

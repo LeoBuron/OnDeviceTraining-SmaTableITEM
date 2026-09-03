@@ -1,5 +1,7 @@
 # Next steps after the Amplitude smoke test
 
+> **Historical handoff (written 2026-04-27, banner added 2026-09-03).** Kept for the Track A / B record; do not act on the Track C–E lists below. Since then: Tracks A + B done; Track C's upstream blockers are gone (Conv1d, LayerNorm, GroupNorm and PPCA replay are in upstream ODT at pin `7d7f1d5`; F1 / F2 / F8 fixed, F7 still worked around); `src/examples/stage1_pretrain.c` is the real trainer and `rq1_replay_buffer.c` is implemented (placeholder MLP); `rq2`–`rq5` remain stubs. The sprint-plan README this file cites was recovered to `docs/paper-plan.md`, whose "Current state" section is now the place to look.
+
 **Written:** 2026-04-27 (D+6), end of session.
 **Reader:** future Claude session with cleared context, OR Leo himself a few days later.
 **State at handoff:** End-to-end Amplitude pipeline green. paper0 bookmark on GitHub at `4f48726` (or whatever tip is current). All 8 amplitude scripts (00, 10, 11, 20, 21, 22, 40, 50) pass; sbatch job 685737 completed in 1m45s with 21 trials and best `accuracy=1.0000` on the synthetic toy. Numerics bit-identical between local Mac (Apple Silicon Clang) and Amplitude (x86_64 Sapphire Rapids GCC 13.3.0).

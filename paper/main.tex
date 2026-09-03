@@ -1,0 +1,45 @@
+% Towards Continual Learning for SmaTables — working draft.
+% Build: latexmk -pdf main.tex   (see paper/README.md). Venue TBD; LNCS format assumed.
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{orcidlink}
+
+% Draft helpers — remove before submission.
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\result}[1]{\textcolor{blue}{[RESULT: #1]}}
+
+\begin{document}
+
+\title{Towards Continual Learning for SmaTables: Replay-Buffer Sizing and On-Device Fine-Tuning for Edge-MCU Gesture Recognition}
+\titlerunning{Continual Learning for SmaTables on an Edge MCU}
+
+\author{Leo Buron \and Florian Hettstedt \and Andreas Erbslöh \and Gregor Schiele}
+\authorrunning{L. Buron et al.}
+\institute{Intelligent Embedded Systems, University of Duisburg-Essen, Germany\\
+\email{\todo{institutional e-mail addresses}}}
+
+\maketitle
+
+\begin{abstract}
+\todo{Write last. Skeleton: SmaTable surface-vibration gesture classifier; all prior work kept inference and training on a PC; we report the first on-RP2350 measurements of both inference and training; on that deployment we quantify (i) how much per-class replay memory prevents forgetting during on-device fine-tuning to a new user (random vs.\ herding exemplars vs.\ PPCA generative replay at matched bytes), (ii) how many new-user samples personalisation needs (LOSO), (iii) how many samples from how many contributors a new gesture needs, (iv) run-to-run stability across seeds, decomposed into init vs.\ data order, (v) whether additive-noise augmentation reduces those budgets. One headline number per RQ.}
+\keywords{Continual learning \and On-device training \and Replay \and Microcontroller \and Gesture recognition \and TinyML}
+\end{abstract}
+
+\input{sections/1-introduction}
+\input{sections/2-related-work}
+\input{sections/3-system}
+\input{sections/4-results}
+\input{sections/5-discussion}
+\input{sections/6-forthcoming}
+
+\bibliographystyle{splncs04}
+\bibliography{references}
+
+\end{document}

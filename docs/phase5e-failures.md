@@ -1,5 +1,7 @@
 # Phase 5e Comparison Failures
 
+> **Stand 2026-09-03 (historisch).** Alle FAILs unten entstanden unter den Upstream-Bugs F1 (CE-Gradient ohne Batch-Normierung) und F2 (DataLoader `indices[]`), beide seit Pin `3e768c7` upstream behoben (Details: `docs/odt-userapi-findings-misc.md`). Die betroffenen MNIST-Examples bauen am aktuellen Pin `7d7f1d5` nicht mehr (Pre-Factory-API, siehe `README.md`); die Vergleiche wurden nach dem Fix nicht wiederholt. Dokument bleibt als Audit-Beleg.
+
 Zeitbegrenzter Ablage-Ort für ODT-vs-PyTorch-Vergleiche, die das 2σ-Akzeptanzkriterium nicht erfüllen. Diese Findings wandern in Plan 2 (USERAPI-Audit) in die endgültige Issue-Dokumentation.
 
 ## 2026-04-19 — `mlp_mnist_float32_host`

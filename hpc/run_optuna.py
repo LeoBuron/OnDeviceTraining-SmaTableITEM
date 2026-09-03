@@ -20,7 +20,7 @@ Usage (local smoke test):
         --rq rq0_toy_synthetic \\
         --host-bin build/HOST-Debug/HOST \\
         --data-dir data/smatable \\
-        --search-space hpc/search_space/rq0_toy.json \\
+        --search-space hpc/search_space/rq0_toy_synthetic.json \\
         --log-dir runs/optuna-local \\
         --n-workers 2
 

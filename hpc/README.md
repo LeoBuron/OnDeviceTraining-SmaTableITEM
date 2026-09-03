@@ -3,8 +3,12 @@
 Optuna-orchestrated CV sweep of per-RQ HOST binaries on the Amplitude (UDE)
 Slurm cluster. Pattern adapted from
 [`smatable-offline`](file:///Users/leo/work/smatable-offline) — same
-Apptainer + `ws_allocate` + `JournalFileBackend` + `mp.Pool` shape, with
-GPU stripped out (CPU-only FP32 ODT trials).
+Apptainer + `ws_allocate` + `mp.Pool` shape (Optuna storage is an SQLite-WAL
+`RDBStorage` on node-local `/tmp`, not the Lustre `JournalFileBackend`, which
+lock-thrashed at 32 workers), with GPU stripped out (CPU-only FP32 ODT trials).
+
+Current state of the campaign (what has and has not run) is tracked in
+`docs/paper-plan.md`, "Current state".
 
 Spec: `docs/superpowers/specs/2026-04-27-hpc-experiment-harness-design.md`.
 
@@ -34,7 +38,7 @@ uv run hpc/run_optuna.py \
     --rq rq0_toy_synthetic \
     --host-bin hpc/bin/rq0_toy_synthetic.host \
     --data-dir data/smatable \
-    --search-space hpc/search_space/rq0_toy.json \
+    --search-space hpc/search_space/rq0_toy_synthetic.json \
     --log-dir runs/optuna-local \
     --fold-scheme LOSO \
     --n-workers 4
@@ -105,28 +109,35 @@ pre-flight audit before the first real Amplitude submission:
 ## On Amplitude
 
 ```bash
-# 1. One-time: rsync the preprocessed dataset to $HPC_HOME/data/smatable.
-#    (1.3 GB — fits comfortably under the workspace 30-day allocation.)
-rsync -av path/to/preprocessed-windows/ $HPC_HOME/data/smatable-preprocessed/
-ssh amplitude  uv run tools/prep_smatable.py \
-    --src $HPC_HOME/data/smatable-preprocessed \
-    --dst $HPC_HOME/data/smatable
+# 0. Sync state. The cluster was last synced 2026-04-27 and the 30-day workspace
+#    has expired since: push paper0, then scripts/amplitude/10_upload_repo.sh and
+#    11_upload_dataset.sh (the four data/smatable-trial-<id>/ dirs, all 15 LOSO folds).
+#    Refresh the vendored ODT on the login node (cmake --preset PREPARE) to the pin.
 
-# 2. One-time: build the Apptainer image on a build node.
-apptainer build hpc/run_container.sif hpc/run_container.def
+# 1. One-time per dataset: prep on the login node (or rsync the prepped dirs) —
+#    exact commands in "Stage-1 datasets" above. Verify fold coverage:
+ls $DATASET_DIR/folds/LOSO | grep -c train.npy     # must print 15
 
-# 3. Per campaign: build the per-RQ HOST binary on the login node, then submit.
-hpc/build_all_rqs.sh rq0_toy_synthetic
-sbatch --export=ALL,RQ=rq0_toy_synthetic,N_WORKERS=32 hpc/run_optuna_amplitude.sh
+# 2. Container: built OFF-cluster (apt + PyPI are proxy-blocked on the login nodes)
+#    via apptainer-in-docker on the Mac — scripts/amplitude/30_build_container.sh —
+#    and rsync'd through gateway.amplitude.uni-due.de. Rebuild only when uv.lock
+#    changes (unchanged since 2026-04-28, so the existing .sif is current).
+
+# 3. Per campaign: build the per-RQ HOST binary on the login node (HOST-Release), then submit.
+hpc/build_all_rqs.sh stage1_pretrain
+sbatch --export=ALL,RQ=stage1_trial3650,HOST_BIN_NAME=stage1_pretrain,DATASET_DIR=$HPC_HOME/data/smatable-trial-3650,N_WORKERS=48,TRIAL_TIMEOUT_S=14400 hpc/run_optuna_amplitude.sh
+# trial-3408 needs TRIAL_TIMEOUT_S=72000 (see "Trial-3408" above).
 ```
 
 The sbatch script:
 - claims/reuses the `smatable-ws` Lustre workspace (30-day allocation),
 - rsyncs the dataset to scratch on first run, reuses on subsequent,
-- bind-mounts `/data` (dataset), `/logs` (Optuna journal + per-trial logs),
+- bind-mounts `/data` (dataset), `/logs` (per-trial logs), `/optuna_db`
+  (`/tmp/optuna-$SLURM_JOB_ID`, node-local tmpfs holding the SQLite study),
   `/host_bin` (pre-built RQ binary), `/search_space.json`,
 - launches `hpc/run_optuna.py` inside the container,
-- copies `slurm-*.{out,err}` plus the search space JSON into the run dir,
+- checkpoints the WAL and copies the consolidated `study.db`, `slurm-*.{out,err}`
+  and the search space JSON into the run dir,
 - final-rsyncs everything into `$HPC_HOME/experiments/`.
 
 ## Per-RQ binary contract
@@ -144,11 +155,12 @@ Each binary in `hpc/bin/<rq>.host` is a self-contained executable that:
 5. exits 0 on success, non-zero on failure (Optuna marks failed trials
    pruned and continues).
 
-Conv1d/LayerNorm/GroupNorm all landed upstream at the current pin (7d7f1d5),
-so this blocker is resolved. `rq1_replay_buffer` is implemented (three-arm
-PPCA/exemplar replay comparison, see `experiments/rq1-replay-buffer/README.md`).
-Stubs `rq2..rq5` still print `RESULT skipped` pending their own per-RQ
-training-loop design — see the spec's "Step 4 — deferred work".
+Binaries at the current pin (`7d7f1d5`): `stage1_pretrain` is the real
+DepthwiseCNN trainer (RESULT keys below); `rq1_replay_buffer` is implemented
+(four replay arms at iso-byte budgets, see
+`experiments/rq1-replay-buffer/README.md`) but still on a placeholder MLP;
+`rq2..rq5` print `RESULT skipped reason="not implemented yet (...)"` and are
+pruned by the driver. Per-RQ status: `experiments/README.md`.
 
 ## HOST↔MCU equivalence layers
 
@@ -159,8 +171,11 @@ training-loop design — see the spec's "Step 4 — deferred work".
 | L2 | training step on HOST(NPY) ≡ HOST(baked) | TBD — reuses `state_dump_compare.py` from Plan-2 audit | seconds |
 | L3 | training step on HOST(baked) ≡ RP2350(baked) | TBD — UART collector + same comparator | minutes |
 
-L0 + L1 are wired and green for synthetic LOSO fold 0. L2 + L3 land alongside
-the real Conv1d/LayerNorm RQ implementations.
+L0 + L1 are wired and green (synthetic set and the four trial datasets). L2 and
+L3 are still TBD; L3 is the RP2350 bring-up item on the paper's critical path
+(`docs/paper-plan.md`) — no MCU binary has been built or flashed at this pin, and
+none can be until F9 (upstream `MemProfile` pthread dependency breaks the
+cross-compile configure; reproduced on `PICO2_W`) is fixed; see `docs/odt-userapi-findings-misc.md`.
 
 ## Known issue surfaced by the L1 test
 
