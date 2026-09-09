@@ -44,14 +44,44 @@ typedef struct smatable_dataset smatable_dataset_t;
 smatable_dataset_t *smatableDatasetOpen(void);
 void                smatableDatasetClose(smatable_dataset_t *ds);
 
+/* Wrappers over SMATABLE_SPLIT_TRAIN / SMATABLE_SPLIT_TEST (see below). */
 size_t smatableDatasetTrainCount(const smatable_dataset_t *ds);
 size_t smatableDatasetTestCount (const smatable_dataset_t *ds);
 
 /* outX must point to (n_channels * window_samples) floats.
  * outY receives a single int32 label.
- * Indices are local to each split (0..count-1). */
+ * Indices are local to each split (0..count-1).
+ * Wrappers over SMATABLE_SPLIT_TRAIN / SMATABLE_SPLIT_TEST (see below). */
 void smatableDatasetGetTrain(const smatable_dataset_t *ds, size_t i, float *outX, int32_t *outY);
 void smatableDatasetGetTest (const smatable_dataset_t *ds, size_t i, float *outX, int32_t *outY);
+
+/* Named splits (paper protocol D5, session-wise LOSO — see
+ * tools/prep_smatable.py). RETAIN and CALIB are optional: schemes that do
+ * not define them (AOS, 80_20) report count 0. */
+typedef enum {
+    SMATABLE_SPLIT_TRAIN = 0,  /* other subjects, sessions before the last  */
+    SMATABLE_SPLIT_RETAIN = 1, /* other subjects, last session (retention)  */
+    SMATABLE_SPLIT_CALIB = 2,  /* held-out subject, first session (fine-tune) */
+    SMATABLE_SPLIT_TEST = 3,   /* held-out subject, sessions after the first */
+    SMATABLE_SPLIT_COUNT = 4
+} smatable_split_t;
+
+/* Split name == fold-file stem suffix ("fold_00_calib.npy" / ".h"). */
+static inline const char *smatableSplitName(smatable_split_t split) {
+    switch (split) {
+    case SMATABLE_SPLIT_TRAIN: return "train";
+    case SMATABLE_SPLIT_RETAIN: return "retain";
+    case SMATABLE_SPLIT_CALIB: return "calib";
+    case SMATABLE_SPLIT_TEST: return "test";
+    default: return "?";
+    }
+}
+
+/* 0 when the dataset does not carry the split. */
+size_t smatableDatasetSplitCount(const smatable_dataset_t *ds, smatable_split_t split);
+/* Aborts (stderr + exit) on an absent split or an out-of-range index. */
+void smatableDatasetGetSplit(const smatable_dataset_t *ds, smatable_split_t split, size_t i,
+                             float *outX, int32_t *outY);
 
 size_t smatableDatasetNChannels    (const smatable_dataset_t *ds);
 size_t smatableDatasetWindowSamples(const smatable_dataset_t *ds);

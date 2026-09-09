@@ -16,6 +16,8 @@ set(L1_FOLD_SCHEME "LOSO" CACHE STRING "fold scheme used by L1 test")
 set(L1_FOLD        "00"   CACHE STRING "fold index used by L1 test")
 set(L1_BAKED_TRAIN "smatable/folds/${L1_FOLD_SCHEME}/fold_${L1_FOLD}_train.h" CACHE STRING "")
 set(L1_BAKED_TEST  "smatable/folds/${L1_FOLD_SCHEME}/fold_${L1_FOLD}_test.h"  CACHE STRING "")
+set(L1_BAKED_RETAIN "smatable/folds/${L1_FOLD_SCHEME}/fold_${L1_FOLD}_retain.h" CACHE STRING "")
+set(L1_BAKED_CALIB  "smatable/folds/${L1_FOLD_SCHEME}/fold_${L1_FOLD}_calib.h"  CACHE STRING "")
 
 # SMATABLE_DATA_INCLUDE_DIR is the directory whose `smatable/` subdir
 # contains the prep-generated fold headers. Default points at the repo's
@@ -38,6 +40,8 @@ target_compile_definitions(smatable_baked_l1 PRIVATE
     SMATABLE_FN_SUFFIX=_baked
     SMATABLE_BAKED_TRAIN_HEADER="${L1_BAKED_TRAIN}"
     SMATABLE_BAKED_TEST_HEADER="${L1_BAKED_TEST}"
+    SMATABLE_BAKED_RETAIN_HEADER="${L1_BAKED_RETAIN}"
+    SMATABLE_BAKED_CALIB_HEADER="${L1_BAKED_CALIB}"
     DEBUG_MODE_ERROR)
 target_include_directories(smatable_baked_l1 PRIVATE
     ${CMAKE_SOURCE_DIR}/src/include

@@ -1,7 +1,9 @@
 /* HOST backend: load the global SmaTable .npy + per-fold index .npy via
- * ODT's NPYLoader. Per-fold sample IDs are int32 indices into the global
- * X/Y arrays; smatableDatasetGetTrain/Test memcpy the addressed window
- * into the caller-supplied buffer.
+ * ODT's NPYLoader. Per fold there are up to four split index files
+ * (fold_KK_train/retain/calib/test.npy); RETAIN and CALIB are optional and
+ * report count 0 when their file is absent (schemes that don't define them,
+ * e.g. AOS / 80_20). smatableDatasetGetSplit memcpys the addressed window
+ * into the caller-supplied buffer; GetTrain/GetTest are thin wrappers.
  *
  * Env vars (all required, no defaults — fail loud):
  *   SMATABLE_DATA_DIR       directory containing smatable_x.npy + smatable_y.npy + folds/
@@ -14,11 +16,13 @@
 
 #define SOURCE_FILE "SMATABLE_DATASET_NPY"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "Common.h"
 #include "Dataset.h"
@@ -86,10 +90,8 @@ struct smatable_dataset {
     tensorArray_t *x;       /* shape per row [C, T], float32 — npyLoad is correct on FLOAT32 */
     int32_t *y;             /* int32[N], read via readInt32NpyDirect */
     size_t nGlobal;
-    int32_t *trainIds;      /* int32[trainN] */
-    size_t trainN;
-    int32_t *testIds;       /* int32[testN] */
-    size_t testN;
+    int32_t *ids[SMATABLE_SPLIT_COUNT]; /* per split, NULL when absent */
+    size_t n[SMATABLE_SPLIT_COUNT];     /* per split, 0 when absent */
     size_t nChannels;
     size_t windowSamples;
     size_t windowFloats;
@@ -141,15 +143,23 @@ smatable_dataset_t *SMA(smatableDatasetOpen)(void) {
 
     char *xPath = joinPath(dir, "smatable_x.npy");
     char *yPath = joinPath(dir, "smatable_y.npy");
-    char *trainPath = foldFile(dir, scheme, (int)fold, "train");
-    char *testPath  = foldFile(dir, scheme, (int)fold, "test");
 
-    ds->x        = npyLoad(xPath);
-    ds->y        = readInt32NpyDirect(yPath, &ds->nGlobal);
-    ds->trainIds = readInt32NpyDirect(trainPath, &ds->trainN);
-    ds->testIds  = readInt32NpyDirect(testPath,  &ds->testN);
+    ds->x = npyLoad(xPath);
+    ds->y = readInt32NpyDirect(yPath, &ds->nGlobal);
 
-    free(xPath); free(yPath); free(trainPath); free(testPath);
+    free(xPath); free(yPath);
+
+    for (int s = 0; s < SMATABLE_SPLIT_COUNT; s++) {
+        char *path = foldFile(dir, scheme, (int)fold, smatableSplitName((smatable_split_t)s));
+        bool required = (s == SMATABLE_SPLIT_TRAIN || s == SMATABLE_SPLIT_TEST);
+        if (!required && access(path, F_OK) != 0) {
+            ds->ids[s] = NULL;
+            ds->n[s] = 0;
+        } else {
+            ds->ids[s] = readInt32NpyDirect(path, &ds->n[s]);
+        }
+        free(path);
+    }
 
     if (ds->x->size == 0 || ds->nGlobal == 0) {
         fprintf(stderr, "[SMATABLE_DATASET_NPY] empty global x/y\n");
@@ -176,17 +186,16 @@ smatable_dataset_t *SMA(smatableDatasetOpen)(void) {
 
 void SMA(smatableDatasetClose)(smatable_dataset_t *ds) {
     /* NPYLoader uses ODT's reserveMemory pool for the X tensors — we cannot
-     * free per-tensor cleanly there. Our int32 buffers (y, trainIds, testIds)
+     * free per-tensor cleanly there. Our int32 buffers (y, per-split ids)
      * came from malloc and are freed here. The reserveMemory pool is
      * reclaimed at process exit. */
     free(ds->y);
-    free(ds->trainIds);
-    free(ds->testIds);
+    for (int s = 0; s < SMATABLE_SPLIT_COUNT; s++) {
+        free(ds->ids[s]);
+    }
     free(ds);
 }
 
-size_t SMA(smatableDatasetTrainCount)(const smatable_dataset_t *ds) { return ds->trainN; }
-size_t SMA(smatableDatasetTestCount) (const smatable_dataset_t *ds) { return ds->testN; }
 size_t SMA(smatableDatasetNChannels)    (const smatable_dataset_t *ds) { return ds->nChannels;    }
 size_t SMA(smatableDatasetWindowSamples)(const smatable_dataset_t *ds) { return ds->windowSamples;}
 size_t SMA(smatableDatasetWindowFloats) (const smatable_dataset_t *ds) { return ds->windowFloats; }
@@ -208,10 +217,34 @@ static void getBy(const smatable_dataset_t *ds, const int32_t *ids, size_t n, si
     *outY = ds->y[globalId];
 }
 
-void SMA(smatableDatasetGetTrain)(const smatable_dataset_t *ds, size_t i, float *outX, int32_t *outY) {
-    getBy(ds, ds->trainIds, ds->trainN, i, outX, outY);
+static void checkSplit(smatable_split_t split) {
+    if ((int)split < 0 || split >= SMATABLE_SPLIT_COUNT) {
+        fprintf(stderr, "[SMATABLE_DATASET_NPY] bad split id %d\n", (int)split);
+        exit(1);
+    }
 }
 
+size_t SMA(smatableDatasetSplitCount)(const smatable_dataset_t *ds, smatable_split_t split) {
+    checkSplit(split);
+    return ds->n[split];
+}
+
+void SMA(smatableDatasetGetSplit)(const smatable_dataset_t *ds, smatable_split_t split, size_t i,
+                                  float *outX, int32_t *outY) {
+    checkSplit(split);
+    if (ds->ids[split] == NULL) {
+        fprintf(stderr, "[SMATABLE_DATASET_NPY] split '%s' is absent from this dataset\n",
+                smatableSplitName(split));
+        exit(1);
+    }
+    getBy(ds, ds->ids[split], ds->n[split], i, outX, outY);
+}
+
+size_t SMA(smatableDatasetTrainCount)(const smatable_dataset_t *ds) { return ds->n[SMATABLE_SPLIT_TRAIN]; }
+size_t SMA(smatableDatasetTestCount)(const smatable_dataset_t *ds) { return ds->n[SMATABLE_SPLIT_TEST]; }
+void SMA(smatableDatasetGetTrain)(const smatable_dataset_t *ds, size_t i, float *outX, int32_t *outY) {
+    SMA(smatableDatasetGetSplit)(ds, SMATABLE_SPLIT_TRAIN, i, outX, outY);
+}
 void SMA(smatableDatasetGetTest)(const smatable_dataset_t *ds, size_t i, float *outX, int32_t *outY) {
-    getBy(ds, ds->testIds, ds->testN, i, outX, outY);
+    SMA(smatableDatasetGetSplit)(ds, SMATABLE_SPLIT_TEST, i, outX, outY);
 }
