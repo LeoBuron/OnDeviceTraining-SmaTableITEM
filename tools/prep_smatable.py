@@ -23,7 +23,12 @@ Outputs deterministic artifacts under --dst (default data/smatable/):
     folds/<scheme>/fold_<k>_test.h
 
 Schemes mirror smatable-offline/src/model_training/dataset_splits.py:
-    LOSO   leave-one-subject-out, 15 folds, mirrors RQ2/RQ4
+    LOSO   session-wise leave-one-subject-out (paper protocol D5, 2026-09-09).
+           One fold per subject; sessions first = min and last = max. Four
+           index sets per fold: train (other subjects, session < last),
+           retain (other subjects, session == last), calib (held-out subject,
+           session == first, event-major order), test (held-out subject,
+           session > first). Mirrors RQ2/RQ4.
     AOS    adapt-one-session, 15 folds (calibration session retained)
     80_20  session-based, 5 folds
 
@@ -167,18 +172,39 @@ def sha256_of(arr: np.ndarray) -> str:
 # ---------- fold construction -----------------------------------------------
 
 
-def fold_indices_loso(meta: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
-    """15 folds — fold k: subject (k+1) is test, rest is train."""
+def fold_indices_loso(meta: np.ndarray) -> list[dict[str, np.ndarray]]:
+    """Session-wise leave-one-subject-out (paper protocol D5, 2026-09-09).
+    Fold k holds out the k-th subject (sorted). With sessions first = min
+    and last = max:
+        train  = other subjects, session <  last   (stage-1 pretraining set)
+        retain = other subjects, session == last   (in-cohort held-out session; retention / BWT eval)
+        calib  = held-out subject, session == first (fine-tune set)
+        test   = held-out subject, session >  first (new-user eval)
+    calib is ordered event-major — sorted by (event, gesture) — so a K-window
+    prefix is as class-balanced as the recording allows. The .npz windows
+    carry no timestamps and event ids are per-gesture repetition counters,
+    so true chronology is not recoverable (spec assumption A3)."""
+    sessions = sorted(set(int(s) for s in meta["session"]))
+    if len(sessions) < 2:
+        raise SystemExit("LOSO needs >= 2 sessions per subject: train/retain and calib/test "
+                         "are split by session")
+    first, last = sessions[0], sessions[-1]
+    ses = meta["session"]
     folds = []
-    subjects = sorted(set(int(s) for s in meta["subject"]))
-    for k, sub in enumerate(subjects):
-        test = np.where(meta["subject"] == sub)[0].astype(np.int32)
-        train = np.where(meta["subject"] != sub)[0].astype(np.int32)
-        folds.append((train, test))
+    for sub in sorted(set(int(s) for s in meta["subject"])):
+        held = meta["subject"] == sub
+        calib = np.where(held & (ses == first))[0]
+        calib = calib[np.lexsort((meta["gesture"][calib], meta["event"][calib]))]
+        folds.append({
+            "train": np.where(~held & (ses < last))[0].astype(np.int32),
+            "retain": np.where(~held & (ses == last))[0].astype(np.int32),
+            "calib": calib.astype(np.int32),
+            "test": np.where(held & (ses > first))[0].astype(np.int32),
+        })
     return folds
 
 
-def fold_indices_aos(meta: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+def fold_indices_aos(meta: np.ndarray) -> list[dict[str, np.ndarray]]:
     """Adapt-one-session — train is all-other-subjects + session-1 of held-out
     subject; test is sessions 2..10 of held-out subject. Mirrors
     smatable-offline SmartTableAOSDataset semantics."""
@@ -188,20 +214,24 @@ def fold_indices_aos(meta: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
         is_held = meta["subject"] == sub
         train_mask = (~is_held) | (is_held & (meta["session"] == 1))
         test_mask = is_held & (meta["session"] != 1)
-        folds.append((np.where(train_mask)[0].astype(np.int32),
-                      np.where(test_mask)[0].astype(np.int32)))
+        folds.append({
+            "train": np.where(train_mask)[0].astype(np.int32),
+            "test": np.where(test_mask)[0].astype(np.int32),
+        })
     return folds
 
 
-def fold_indices_80_20(meta: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+def fold_indices_80_20(meta: np.ndarray) -> list[dict[str, np.ndarray]]:
     """5 folds — fold k: sessions {2k+1, 2k+2} are test, rest is train."""
     folds = []
     sessions = sorted(set(int(s) for s in meta["session"]))
     pairs = [sessions[i:i + 2] for i in range(0, len(sessions), 2)]
     for pair in pairs:
         is_test = np.isin(meta["session"], pair)
-        folds.append((np.where(~is_test)[0].astype(np.int32),
-                      np.where(is_test)[0].astype(np.int32)))
+        folds.append({
+            "train": np.where(~is_test)[0].astype(np.int32),
+            "test": np.where(is_test)[0].astype(np.int32),
+        })
     return folds
 
 
@@ -358,6 +388,7 @@ def main() -> int:
         "sha256_y": sha_y,
         "max_samples_per_fold": int(args.max_samples_per_fold),
         "schemes": schemes,
+        "split_version": 2,
     }
     (args.dst / "smatable_meta.json").write_text(json.dumps(info, indent=2))
 
@@ -369,16 +400,15 @@ def main() -> int:
         sdir = folds_root / scheme
         sdir.mkdir(exist_ok=True)
         folds = SCHEMES[scheme](meta)
-        for k, (train_ids, test_ids) in enumerate(folds):
+        for k, splits in enumerate(folds):
             if args.max_samples_per_fold > 0:
-                train_ids = train_ids[: args.max_samples_per_fold]
-                test_ids = test_ids[: args.max_samples_per_fold]
-            np.save(sdir / f"fold_{k:02d}_train.npy", train_ids)
-            np.save(sdir / f"fold_{k:02d}_test.npy", test_ids)
-            print(f"  {scheme} fold {k:02d}: train={train_ids.size} test={test_ids.size}")
+                splits = {s: ids[: args.max_samples_per_fold] for s, ids in splits.items()}
+            for split, ids in splits.items():
+                np.save(sdir / f"fold_{k:02d}_{split}.npy", ids)
+            print(f"  {scheme} fold {k:02d}: " + " ".join(f"{s}={ids.size}" for s, ids in splits.items()))
             if args.no_baked:
                 continue
-            for split, ids in (("train", train_ids), ("test", test_ids)):
+            for split, ids in splits.items():
                 write_baked_header(
                     sdir / f"fold_{k:02d}_{split}.h",
                     scheme=scheme, k=k, split=split,
