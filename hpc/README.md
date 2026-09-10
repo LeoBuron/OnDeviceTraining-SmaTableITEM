@@ -62,7 +62,7 @@ uv run tools/prep_smatable.py --src data/model_and_dataset/trial-4223/dataset --
 | 3650 | 250 | 8999 | 6 |
 | 4223 | 625 | 8999 | 6 |
 
-All outputs land in gitignored `data/smatable-trial-<id>/` directories with bytewise-canonical `smatable_x.npy [8999,4,T]` and `smatable_y.npy` plus fold indices for LOSO (15 subjects; session-wise since 2026-09-10: `train` = other subjects × sessions 1–9 = 7559, `retain` = other subjects × session 10 = 840, `calib` = held-out subject × session 1 = 60 in event-major order, `test` = held-out subject × sessions 2–10 = 540; verify with `uv run tests/prep_splits_check.py --dst data/smatable-trial-3650`) and AOS (15 sessions, ~8459 train / ~540 test per fold). The `--no-baked` flag ensures no MCU header files are generated (stage 2 integrates baked backends for RP2350 runs).
+All outputs land in gitignored `data/smatable-trial-<id>/` directories with bytewise-canonical `smatable_x.npy [8999,4,T]` and `smatable_y.npy` plus fold indices for LOSO (15 subjects; session-wise since 2026-09-10: `train` = other subjects × sessions 1–9 = 7559 (7560 on fold 13), `retain` = other subjects × session 10 = 840, `calib` = held-out subject × session 1 = 60 (59 on fold 13 — one short session) in event-major order, `test` = held-out subject × sessions 2–10 = 540; verify with `uv run tests/prep_splits_check.py --dst data/smatable-trial-3650`) and AOS (15 sessions, ~8459 train / ~540 test per fold). The `--no-baked` flag ensures no MCU header files are generated (stage 2 integrates baked backends for RP2350 runs).
 
 ### Trial-3408: reduced grid + optional extension
 

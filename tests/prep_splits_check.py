@@ -36,10 +36,13 @@ def main() -> int:
     first, last = sessions[0], sessions[-1]
     loso = args.dst / "folds" / "LOSO"
 
+    sizes_by_split: dict[str, list[int]] = {s: [] for s in SPLITS}
     for k, sub in enumerate(subjects):
         ids = {s: np.load(loso / f"fold_{k:02d}_{s}.npy") for s in SPLITS}
         for s, arr in ids.items():
             assert arr.dtype == np.int32, f"fold {k} {s}: dtype {arr.dtype}"
+            assert arr.size > 0, f"fold {k} {s}: split is empty"
+            sizes_by_split[s].append(arr.size)
         cat = np.concatenate(list(ids.values()))
         assert len(set(cat.tolist())) == cat.size, f"fold {k}: splits overlap"
         assert cat.size == meta.size, f"fold {k}: splits cover {cat.size} != {meta.size} windows"
@@ -53,8 +56,12 @@ def main() -> int:
         for s in ("train", "retain", "test"):
             assert (np.diff(ids[s]) > 0).all(), f"fold {k}: {s} ids not strictly ascending"
 
-    sizes = " ".join(f"{s}={np.load(loso / f'fold_00_{s}.npy').size}" for s in SPLITS)
-    print(f"PREP-SPLITS PASS — {len(subjects)} LOSO folds, sessions {first}..{last}; fold 00: {sizes}")
+    def fmt(s: str) -> str:
+        lo, hi = min(sizes_by_split[s]), max(sizes_by_split[s])
+        return f"{s}={lo}" if lo == hi else f"{s}={lo}..{hi}"
+
+    sizes = " ".join(fmt(s) for s in SPLITS)
+    print(f"PREP-SPLITS PASS — {len(subjects)} LOSO folds, sessions {first}..{last}; {sizes}")
     return 0
 
 

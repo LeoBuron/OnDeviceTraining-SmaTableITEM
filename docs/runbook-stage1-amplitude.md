@@ -107,8 +107,10 @@ scripts/amplitude/50_inspect_result.sh 123456
 **C0. Start the Adam reference on the Mac** right after B7 (hours; trial-3408 is the slow one). It is the V3 gate's reference and C3 reads it from `runs/r0/reference.csv` by default; the script is resumable:
 
 ```
-uv run tools/stage1_r0.py --configs trial-2353,trial-3408,trial-3650,trial-4223 --folds 0-14 --out runs/r0/reference.csv
+uv run tools/stage1_r0.py --configs trial-3650,trial-4223,trial-2353,trial-3408 --folds 0-14 --out runs/r0/reference.csv
 ```
+
+The aggregator prints how many reference folds the V3 verdict rests on and warns when it is not 15.
 
 **C1. Find the Lustre home once:**
 
@@ -128,7 +130,7 @@ rsync -av gateway.amplitude.uni-due.de:$H/experiments/ runs/optuna-amplitude/
 uv run tools/aggregate_stage1.py --run-dir runs/optuna-amplitude/smatable_optuna_123456 --config-name trial-3650 --out runs/stage1_selection_3650.json
 ```
 
-For trial-3408 with the optional weight-decay extension study, pass both run directories (see "Trial-3408" in `hpc/README.md`). The four selection JSONs are the inputs for the RQ1 port and stage 2 — hand them to me.
+For trial-3408 with the optional weight-decay extension study, pass both run directories (see "Trial-3408" in `hpc/README.md`). The aggregator now also reports `mean_test_acc` per combo. The four selection JSONs are the inputs for the RQ1 port and stage 2 — hand them to me.
 
 ## Deliberately not in this runbook
 

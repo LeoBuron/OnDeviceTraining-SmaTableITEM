@@ -98,6 +98,10 @@ else
     echo "Dataset already on workspace -> reusing ${DATA_CACHE}"
 fi
 
+# A pre-2026-09-10 cache has no calib split (session-wise D5 re-prep added it);
+# reusing one silently makes every trial exit 1 and prune, "succeeding" with zero complete trials.
+[ -f "${DATA_CACHE}/folds/LOSO/fold_00_calib.npy" ] || { echo "stale dataset cache: ${DATA_CACHE} has no calib split (pre-2026-09-10 prep) — delete it and resubmit"; exit 1; }
+
 # ---- storage backend (SQLite on local tmpfs) ---------------------------
 # Track-A fix: replaced the JournalFileBackend on Lustre — its POSIX advisory
 # locks were going through the cluster lock manager (~100 ms+/acquire) and
