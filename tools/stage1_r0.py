@@ -61,7 +61,7 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     done = done_keys(args.out)
-    write_header = not args.out.exists()
+    write_header = not args.out.exists() or args.out.stat().st_size == 0
     for config in [c for c in args.configs.split(",") if c]:
         cfg = json.loads((args.model_root / config / "config.json").read_text())
         data_dir = args.data_root / f"smatable-{config}"
