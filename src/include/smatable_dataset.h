@@ -22,9 +22,17 @@
  *                                           SMATABLE_FOLD_SCHEME /
  *                                           SMATABLE_FOLD.
  *   - MCU:                                  baked backend, fold + scheme
- *                                           fixed at compile time via
- *                                           -DSMATABLE_FOLD=<k>
- *                                           and the corresponding .h files.
+ *                                           fixed at compile time by pointing
+ *                                           the four header slots
+ *                                           -DSMATABLE_BAKED_{TRAIN,RETAIN,
+ *                                           CALIB,TEST}_HEADER at the
+ *                                           generated fold_<k>_<split>.h
+ *                                           (RETAIN/CALIB optional; defaults
+ *                                           are the synthetic LOSO fold 00).
+ *                                           tests/CMakeLists.txt sets all
+ *                                           four; cmake/pico/targets/pico{1,2w}.cmake
+ *                                           wire only the source, so the
+ *                                           defaults apply there.
  */
 
 #ifndef SMATABLE_DATASET_H

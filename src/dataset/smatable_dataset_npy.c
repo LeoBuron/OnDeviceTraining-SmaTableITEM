@@ -16,6 +16,7 @@
 
 #define SOURCE_FILE "SMATABLE_DATASET_NPY"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -130,8 +131,8 @@ smatable_dataset_t *SMA(smatableDatasetOpen)(void) {
 
     char *endp = NULL;
     long fold = strtol(foldStr, &endp, 10);
-    if (endp == foldStr || *endp || fold < 0) {
-        fprintf(stderr, "[SMATABLE_DATASET_NPY] SMATABLE_FOLD must be a non-negative integer, got '%s'\n", foldStr);
+    if (endp == foldStr || *endp || fold < 0 || fold > INT_MAX) {
+        fprintf(stderr, "[SMATABLE_DATASET_NPY] SMATABLE_FOLD must be an integer in [0, %d], got '%s'\n", INT_MAX, foldStr);
         exit(1);
     }
 
