@@ -52,7 +52,7 @@ Each step needs the artifact of the previous one.
 5. RP2350: fix F9 (MCU configure blocker), build with `PICO2_W` + baked fold headers, flash, run inference, run one training step, L3 comparator vs. HOST, then the top configs on device. Critical path: it cannot be parallelised on the cluster and it carries the headline claim.
 6. Figures, draft (§1–§6), co-author review round.
 
-Known per-trial wall clock at 250 epochs (local, 4 workers): trial-3650 ≈ 46 min; trial-3408 ≈ 17.5 h; trial-2353 / trial-4223 not yet measured. RQ1 worst case 389 s with `HOST-Release`.
+Known per-trial wall clock at 250 epochs: trial-3650 ≈ 46 min (local, 4 concurrent workers, July); trial-3408 ≈ 4.9 h (single-process Release smoke 2026-09-10, 70 s/epoch; the July 4-worker figure was 17.5 h); trial-2353 / trial-4223 not yet measured. RQ1 worst case 389 s with `HOST-Release`.
 
 ### Cut order (scope-reduction ladder)
 
@@ -278,7 +278,7 @@ Energy was out of scope in the April plan; the measurement bench now exists, so 
 | ~~Florian's pre-trained base-model checkpoint not available~~ | — | — | Resolved: stage 1 retrains in ODT from his trial datasets |
 | RP2350 bring-up takes longer than planned | Medium | **High** — carries the headline claim | Start it in parallel with the cluster sweeps; a HOST-only fallback weakens the claim to "MCU-bit-equivalent training" and must be stated as such |
 | Replay curves come out non-monotonic / noisy | Medium | Medium | RQ4 establishes the noise floor (interim: RQ1's own seed axis); report curves with error bars; herding as the stable anchor |
-| Optuna wall-clock blows up on the supercomputer | Low | High | Grids are small and measured (see "Current state"); trial-3408 is the outlier (17.5 h/trial) and has a reduced grid + extension complement |
+| Optuna wall-clock blows up on the supercomputer | Low | High | Grids are small and measured (see "Current state"); trial-3408 is the outlier (~4.9 h/trial) and has a reduced grid + extension complement |
 | RQ3 dataset manipulation introduces artefacts | Medium | Medium | Construction declared explicitly; RQ3 is a secondary, non-load-bearing claim |
 | Paper reads as "fine-tuning study" not "CL study" | Medium | Low | Title, intro, and RQ1 framing all foreground replay + forgetting control |
 | COI at ITEM (if chosen) mishandled | Low | High | COI declared to Gregor before submission; submission-handler co-author designated |

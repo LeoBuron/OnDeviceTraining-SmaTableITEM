@@ -66,7 +66,7 @@ All outputs land in gitignored `data/smatable-trial-<id>/` directories with byte
 
 ### Trial-3408: reduced grid + optional extension
 
-Trial-3408 does not fit the RP2350 (measured 1953 KiB vs 520 KB SRAM) and costs ~17.5 h per 250-epoch trial, so its base study runs a **reduced grid**: `stage1_trial3408.json` fixes `weight_decay=0.0` (75 trials instead of 150). Its trials also need a larger per-trial timeout: `TRIAL_TIMEOUT_S=72000` (the 14400 s used for the other configs kills every 3408 trial).
+Trial-3408 does not fit the RP2350 (measured 1953 KiB vs 520 KB SRAM) and costs ~4.9 h per 250-epoch Release trial (70 s/epoch in a single-process smoke on 2026-09-10; the July figure of 17.5 h was measured with 4 concurrent local workers), so its base study runs a **reduced grid**: `stage1_trial3408.json` fixes `weight_decay=0.0` (75 trials instead of 150). Its trials also need a larger per-trial timeout: `TRIAL_TIMEOUT_S=72000` (the 14400 s used for the other configs kills every 3408 trial; 72000 s is a generous margin).
 
 If compute allows, extend to the full protocol by running the **complement grid** `stage1_trial3408_ext_wd.json` (`weight_decay=0.0001`, the exact 75 missing combos) as a second study — never widen the grid of an existing study: `GridSampler` identifies cells by index within the serialized search space, so a changed space re-runs everything. Aggregate both studies as one by passing multiple run dirs:
 
