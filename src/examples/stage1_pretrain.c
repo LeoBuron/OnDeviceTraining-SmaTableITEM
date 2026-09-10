@@ -7,15 +7,22 @@
  * ReLU [-> Dropout] -> Linear(16->NC) -> Softmax (fused with CE loss).
  * Mirrors the verified PyTorch reference (tools/verify_reference.py).
  *
- * Protocol parity with the reference experiment: cosine LR annealing
- * (CosineAnnealingLR, T_max = epochs, eta_min 0, stepped per epoch),
- * best-epoch selection on the left-out subject, SGD-M instead of Adam
- * (stage-1 grid re-searches lr/wd for that reason).
+ * Protocol (design-review decisions D1 2026-09-06 + D5 2026-09-09, spec
+ * docs/superpowers/specs/2026-09-10-d1-d5-protocol-change-design.md):
+ *   - session-wise LOSO: train on the `train` split (other subjects, all
+ *     sessions but the last); evaluate on the held-out subject's calib+test
+ *     splits (all of its sessions, calib rows first). A dataset without a
+ *     calib split is refused (old prep).
+ *   - final-epoch model is the checkpoint and the headline; the best epoch
+ *     is tracked only as a diagnostic (selection-bias column in the paper).
+ *   - cosine LR annealing (CosineAnnealingLR, T_max = epochs, eta_min 0,
+ *     stepped per epoch), SGD-M (stage-1 grid re-searches lr/wd).
  *
  * Stdout contract (hpc/run_optuna.py):
  *   BEGIN stage1_pretrain <iso8601>
  *   EPOCH <e> train_loss=<f> train_acc=-1 val_loss=<f> val_acc=<f>
- *   RESULT accuracy=<best_val_acc> best_epoch=<i> n_params=<i> wall_clock_s=<f>
+ *   RESULT accuracy=<final-epoch acc, calib+test> test_acc=<final-epoch acc, test only>
+ *          best_val_acc=<max val_acc over epochs> best_epoch=<i> n_params=<i> wall_clock_s=<f> …
  * (train_acc=-1: not computed — a second forward pass per epoch is not worth it.)
  *
  * Env contract: see the table in the implementation plan / hpc/README.md.
@@ -198,11 +205,18 @@ static int writeNpyFloat_2(const char *dir, const char *name, const float *d, si
 /* ---------- dataset: copy smatable split into a DataLoader-compatible dataset_t ---------- */
 
 static dataset_t g_train;
-static dataset_t g_test;
+static dataset_t g_eval; /* calib rows first, then test rows */
+static size_t g_nCalib;
 static size_t g_C, g_T, g_NC;
 
-static void buildSplit(dataset_t *dst, const smatable_dataset_t *ds, bool trainSplit) {
-    size_t n = trainSplit ? smatableDatasetTrainCount(ds) : smatableDatasetTestCount(ds);
+/* Materializes the concatenation of `splits` (in the given order) into one
+ * DataLoader-compatible dataset_t. */
+static void buildSplit(dataset_t *dst, const smatable_dataset_t *ds, const smatable_split_t *splits,
+                       size_t nSplits) {
+    size_t n = 0;
+    for (size_t s = 0; s < nSplits; s++) {
+        n += smatableDatasetSplitCount(ds, splits[s]);
+    }
     size_t wf = smatableDatasetWindowFloats(ds);
 
     tensorArray_t *items = reserveMemory(sizeof(tensorArray_t));
@@ -213,47 +227,47 @@ static void buildSplit(dataset_t *dst, const smatable_dataset_t *ds, bool trainS
     labels->array = reserveMemory(n * sizeof(tensor_t *));
 
     float *tmp = reserveMemory(wf * sizeof(float));
-    for (size_t i = 0; i < n; i++) {
-        int32_t lab;
-        if (trainSplit) {
-            smatableDatasetGetTrain(ds, i, tmp, &lab);
-        } else {
-            smatableDatasetGetTest(ds, i, tmp, &lab);
+    size_t i = 0;
+    for (size_t s = 0; s < nSplits; s++) {
+        size_t ns = smatableDatasetSplitCount(ds, splits[s]);
+        for (size_t j = 0; j < ns; j++, i++) {
+            int32_t lab;
+            smatableDatasetGetSplit(ds, splits[s], j, tmp, &lab);
+
+            size_t *xd = reserveMemory(3 * sizeof(size_t));
+            xd[0] = 1;
+            xd[1] = g_C;
+            xd[2] = g_T;
+            size_t *xo = reserveMemory(3 * sizeof(size_t));
+            setOrderOfDimsForNewTensor(3, xo);
+            shape_t *xs = reserveMemory(sizeof(shape_t));
+            setShape(xs, xd, 3, xo);
+            tensor_t *x = initTensor(xs, quantizationInitFloat(), NULL);
+            memcpy(x->data, tmp, wf * sizeof(float));
+            items->array[i] = x;
+
+            /* rank-2 [1, NC] (not rank-1 [NC]): must match the model's real
+             * softmax-output rank. reserveInferenceStats() (InferenceApi.c)
+             * sizes inferenceStats->output via getShapeLike(label->shape), then
+             * inferenceWithLoss() copyTensor()s the model's actual output shape
+             * into it (copyShape(), Tensor.c) -- a rank-1 label makes that dest
+             * one size_t short, so the copy overflows the allocation (fatal
+             * under ODT_MEM_PROFILE's exact-size allocator; silently absorbed
+             * into calloc() slack otherwise). Data layout is unaffected (still
+             * NC contiguous floats) and no consumer reads label->shape rank as
+             * a batch size (CE reads softmaxOutput's shape, not label's; see
+             * upstream F8). */
+            size_t *yd = reserveMemory(2 * sizeof(size_t));
+            yd[0] = 1;
+            yd[1] = g_NC;
+            size_t *yo = reserveMemory(2 * sizeof(size_t));
+            setOrderOfDimsForNewTensor(2, yo);
+            shape_t *ys = reserveMemory(sizeof(shape_t));
+            setShape(ys, yd, 2, yo);
+            tensor_t *y = initTensor(ys, quantizationInitFloat(), NULL);
+            ((float *)y->data)[(size_t)lab] = 1.0f;
+            labels->array[i] = y;
         }
-
-        size_t *xd = reserveMemory(3 * sizeof(size_t));
-        xd[0] = 1;
-        xd[1] = g_C;
-        xd[2] = g_T;
-        size_t *xo = reserveMemory(3 * sizeof(size_t));
-        setOrderOfDimsForNewTensor(3, xo);
-        shape_t *xs = reserveMemory(sizeof(shape_t));
-        setShape(xs, xd, 3, xo);
-        tensor_t *x = initTensor(xs, quantizationInitFloat(), NULL);
-        memcpy(x->data, tmp, wf * sizeof(float));
-        items->array[i] = x;
-
-        /* rank-2 [1, NC] (not rank-1 [NC]): must match the model's real
-         * softmax-output rank. reserveInferenceStats() (InferenceApi.c)
-         * sizes inferenceStats->output via getShapeLike(label->shape), then
-         * inferenceWithLoss() copyTensor()s the model's actual output shape
-         * into it (copyShape(), Tensor.c) -- a rank-1 label makes that dest
-         * one size_t short, so the copy overflows the allocation (fatal
-         * under ODT_MEM_PROFILE's exact-size allocator; silently absorbed
-         * into calloc() slack otherwise). Data layout is unaffected (still
-         * NC contiguous floats) and no consumer reads label->shape rank as
-         * a batch size (CE reads softmaxOutput's shape, not label's; see
-         * upstream F8). */
-        size_t *yd = reserveMemory(2 * sizeof(size_t));
-        yd[0] = 1;
-        yd[1] = g_NC;
-        size_t *yo = reserveMemory(2 * sizeof(size_t));
-        setOrderOfDimsForNewTensor(2, yo);
-        shape_t *ys = reserveMemory(sizeof(shape_t));
-        setShape(ys, yd, 2, yo);
-        tensor_t *y = initTensor(ys, quantizationInitFloat(), NULL);
-        ((float *)y->data)[(size_t)lab] = 1.0f;
-        labels->array[i] = y;
     }
     freeReservedMemory(tmp);
     dst->items = items;
@@ -262,8 +276,11 @@ static void buildSplit(dataset_t *dst, const smatable_dataset_t *ds, bool trainS
 
 static sample_t *getTrainSample(size_t id) { return npyGetSample(&g_train, id); }
 static size_t getTrainSize(void) { return g_train.items->size; }
-static sample_t *getTestSample(size_t id) { return npyGetSample(&g_test, id); }
-static size_t getTestSize(void) { return g_test.items->size; }
+static sample_t *getEvalSample(size_t id) { return npyGetSample(&g_eval, id); }
+static size_t getEvalSize(void) { return g_eval.items->size; }
+/* test-only view of g_eval (rows after the calib block) — no data copy */
+static sample_t *getTestOnlySample(size_t id) { return npyGetSample(&g_eval, id + g_nCalib); }
+static size_t getTestOnlySize(void) { return g_eval.items->size - g_nCalib; }
 
 /* ---------- model + param registry ---------- */
 
@@ -435,43 +452,9 @@ static memBudget_t computeMemBudget(layer_t **model, size_t modelSize) {
     b.masks = g_maskBytes;
     b.mcuTotal = b.params + b.grads + b.optstate + b.act + b.gradbuf + b.io + b.masks;
     /* Host-only, flash-resident on MCU — excluded from mcuTotal by design: */
-    b.datasetHost = (getTrainSize() + getTestSize()) *
+    b.datasetHost = (getTrainSize() + getEvalSize()) *
                     (g_C * g_T * sizeof(float) + g_NC * sizeof(float));
     return b;
-}
-
-/* ---------- best-epoch snapshot ---------- */
-
-static float *g_snap[MAX_PARAM_LAYERS][2];
-
-static void snapshotAlloc(void) {
-    for (size_t i = 0; i < g_numParamLayers; i++) {
-        g_snap[i][0] = malloc(calcNumberOfElementsByTensor(g_params[i].w->param) * sizeof(float));
-        g_snap[i][1] = g_params[i].b
-                           ? malloc(calcNumberOfElementsByTensor(g_params[i].b->param) *
-                                    sizeof(float))
-                           : NULL;
-    }
-}
-static void snapshotSave(void) {
-    for (size_t i = 0; i < g_numParamLayers; i++) {
-        memcpy(g_snap[i][0], g_params[i].w->param->data,
-               calcNumberOfElementsByTensor(g_params[i].w->param) * sizeof(float));
-        if (g_params[i].b) {
-            memcpy(g_snap[i][1], g_params[i].b->param->data,
-                   calcNumberOfElementsByTensor(g_params[i].b->param) * sizeof(float));
-        }
-    }
-}
-static void snapshotRestore(void) {
-    for (size_t i = 0; i < g_numParamLayers; i++) {
-        memcpy(g_params[i].w->param->data, g_snap[i][0],
-               calcNumberOfElementsByTensor(g_params[i].w->param) * sizeof(float));
-        if (g_params[i].b) {
-            memcpy(g_params[i].b->param->data, g_snap[i][1],
-                   calcNumberOfElementsByTensor(g_params[i].b->param) * sizeof(float));
-        }
-    }
 }
 
 /* ---------- checkpoint I/O ---------- */
@@ -535,7 +518,8 @@ typedef struct trainCtx {
     layer_t **model;
     size_t modelSize;
     optimizer_t *sgd;
-    dataLoader_t *testLoader;
+    dataLoader_t *evalLoader;
+    dataLoader_t *testOnlyLoader;
     lossConfig_t lossCfg;
     /* config */
     int nEpochs, batchSize;
@@ -544,11 +528,11 @@ typedef struct trainCtx {
     bool cosine;
     const char *ckptDir;
     /* outputs */
-    float bestAcc;
+    float finalAcc, testAcc, bestAcc;
     int bestEpoch;
 } trainCtx_t;
 
-/* Everything the epoch loop + best-epoch snapshot + ckpt/manifest write used
+/* Everything the epoch loop + final-epoch checkpoint + ckpt/manifest write used
  * to do directly in main() now lives here so it can run under upstream's
  * measurePeakStackBytes (MemProfile.h), which measures it on a fresh,
  * paint-scannable pthread stack. ensureDir()/calloc() failures that used to
@@ -561,7 +545,6 @@ typedef struct trainCtx {
 static void trainMain(void *argp) {
     trainCtx_t *ctx = (trainCtx_t *)argp;
 
-    snapshotAlloc();
     FILE *hist = NULL;
     if (ctx->ckptDir != NULL) {
         if (ensureDir(ctx->ckptDir) != 0) {
@@ -575,7 +558,7 @@ static void trainMain(void *argp) {
         }
     }
 
-    float bestAcc = -1.0f;
+    float bestAcc = -1.0f, finalAcc = -1.0f;
     int bestEpoch = 0;
     for (int e = 0; e < ctx->nEpochs; e++) {
         float lrE = ctx->cosine
@@ -593,7 +576,7 @@ static void trainMain(void *argp) {
         freeDataLoader(trainLoader);
 
         epochStats_t st = evaluationEpochWithMetrics(ctx->model, ctx->modelSize, CROSS_ENTROPY,
-                                                     ctx->testLoader, inferenceWithLoss,
+                                                     ctx->evalLoader, inferenceWithLoss,
                                                      REDUCTION_MEAN);
         printf("EPOCH %d train_loss=%.4f train_acc=-1 val_loss=%.4f val_acc=%.4f\n", e + 1,
                (double)trainLoss, (double)st.loss, (double)st.accuracy);
@@ -603,32 +586,45 @@ static void trainMain(void *argp) {
                     (double)trainLoss, (double)st.loss, (double)st.accuracy, (double)st.precision,
                     (double)st.recall);
         }
+        finalAcc = st.accuracy;
         if (st.accuracy > bestAcc) {
             bestAcc = st.accuracy;
             bestEpoch = e + 1;
-            snapshotSave();
         }
     }
     if (hist) {
         fclose(hist);
     }
 
-    snapshotRestore();
+    epochStats_t stT = evaluationEpochWithMetrics(ctx->model, ctx->modelSize, CROSS_ENTROPY,
+                                                  ctx->testOnlyLoader, inferenceWithLoss,
+                                                  REDUCTION_MEAN);
+    float testAcc = stT.accuracy;
 
     if (ctx->ckptDir != NULL) {
-        ckptWrite(ctx->ckptDir);
+        ckptWrite(ctx->ckptDir); /* final-epoch weights (D1) */
 
-        /* confusion matrix of the restored best model, for the manifest
+        /* confusion matrix of the written weights, for the manifest
          * (heap-sized to g_NC*g_NC — evaluationEpochWithReport writes that
-         * many entries, so a fixed buffer would overflow for NC > 6) */
+         * many entries, so a fixed buffer would overflow for NC > 6). Its
+         * accuracy must equal the last epoch's — same weights, deterministic
+         * eval. Anything else means the eval path is not deterministic (e.g.
+         * dropout active), which would invalidate every number, so fail
+         * loud. */
         size_t *cm = calloc(g_NC * g_NC, sizeof(size_t));
         if (cm == NULL) {
             fprintf(stderr, "ERROR: cannot allocate %zux%zu confusion matrix\n", g_NC, g_NC);
             exit(1);
         }
         classificationReport_t rep = evaluationEpochWithReport(
-            ctx->model, ctx->modelSize, CROSS_ENTROPY, ctx->testLoader, inferenceWithLoss, cm,
+            ctx->model, ctx->modelSize, CROSS_ENTROPY, ctx->evalLoader, inferenceWithLoss, cm,
             g_NC, REDUCTION_MEAN);
+        if (fabsf(rep.stats.accuracy - finalAcc) > 1e-6f) {
+            fprintf(stderr, "ERROR: re-evaluation of the written checkpoint gives %.6f, last epoch "
+                            "gave %.6f — eval is not deterministic\n",
+                    (double)rep.stats.accuracy, (double)finalAcc);
+            exit(1);
+        }
 
         size_t nParams = countParams();
         size_t k = (size_t)env_int("ODT_KERNEL_SIZE", 7);
@@ -653,9 +649,13 @@ static void trainMain(void *argp) {
                         "\"lr_schedule\": \"%s\",\n",
                     (double)ctx->lr0, (double)momentum, (double)weightDecay, ctx->nEpochs,
                     ctx->batchSize, (unsigned)ctx->seed, ctx->cosine ? "cosine" : "constant");
+            fprintf(mf, "  \"eval_set\": \"calib+test\", \"n_calib\": %zu, \"n_test\": %zu,\n",
+                    g_nCalib, getTestOnlySize());
+            fprintf(mf, "  \"final_epoch\": %d, \"final_val_acc\": %.6f, \"test_acc\": %.6f,\n",
+                    ctx->nEpochs, (double)finalAcc, (double)testAcc);
             fprintf(mf, "  \"best_epoch\": %d, \"best_val_acc\": %.6f,\n", bestEpoch,
                     (double)bestAcc);
-            fprintf(mf, "  \"restored_val_acc\": %.6f, \"val_precision\": %.6f, "
+            fprintf(mf, "  \"ckpt_val_acc\": %.6f, \"val_precision\": %.6f, "
                         "\"val_recall\": %.6f,\n",
                     (double)rep.stats.accuracy, (double)rep.stats.precision,
                     (double)rep.stats.recall);
@@ -669,6 +669,8 @@ static void trainMain(void *argp) {
         free(cm);
     }
 
+    ctx->finalAcc = finalAcc;
+    ctx->testAcc = testAcc;
     ctx->bestAcc = bestAcc;
     ctx->bestEpoch = bestEpoch;
 }
@@ -706,8 +708,16 @@ int main(void) {
     g_C = smatableDatasetNChannels(ds);
     g_T = smatableDatasetWindowSamples(ds);
     g_NC = smatableDatasetNClasses(ds);
-    buildSplit(&g_train, ds, true);
-    buildSplit(&g_test, ds, false);
+    g_nCalib = smatableDatasetSplitCount(ds, SMATABLE_SPLIT_CALIB);
+    if (g_nCalib == 0) {
+        fprintf(stderr,
+                "ERROR: dataset has no calib split — stage 1 needs the session-wise LOSO prep "
+                "(tools/prep_smatable.py, split_version 2); re-prep SMATABLE_DATA_DIR\n");
+        return 1;
+    }
+    buildSplit(&g_train, ds, (const smatable_split_t[]){SMATABLE_SPLIT_TRAIN}, 1);
+    buildSplit(&g_eval, ds, (const smatable_split_t[]){SMATABLE_SPLIT_CALIB, SMATABLE_SPLIT_TEST},
+               2);
     smatableDatasetClose(ds);
     /* Heap live-bytes right after dataset materialization + close (baseline
      * memProfileReset() at main() entry) — mirrored into RESULT/memory.json
@@ -718,8 +728,8 @@ int main(void) {
 #else
     long rssAfterData = -1;
 #endif
-    printf("  dataset: train=%zu test=%zu C=%zu T=%zu NC=%zu\n", getTrainSize(), getTestSize(),
-           g_C, g_T, g_NC);
+    printf("  dataset: train=%zu eval=%zu (calib=%zu test=%zu) C=%zu T=%zu NC=%zu\n",
+           getTrainSize(), getEvalSize(), g_nCalib, getTestOnlySize(), g_C, g_T, g_NC);
 
     /* model (seed BEFORE init so factory weight init is reproducible) */
     rngSetSeed(seed);
@@ -740,20 +750,23 @@ int main(void) {
     lossConfig_t lossCfg = {
         .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
 
-    dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL, false, 0,
+    dataLoader_t *evalLoader = dataLoaderInit(getEvalSample, getEvalSize, 1, NULL, NULL, false, 0,
                                               true);
+    dataLoader_t *testOnlyLoader =
+        dataLoaderInit(getTestOnlySample, getTestOnlySize, 1, NULL, NULL, false, 0, true);
 
     /* ---- V1: eval-only parity mode ---- */
     if (env_flag("ODT_EVAL_ONLY")) {
         if (ensureDir(dumpDir) != 0) {
             return 1;
         }
-        size_t nTest = getTestSize();
-        float *logits = malloc(nTest * g_NC * sizeof(float));
-        float *preds = malloc(nTest * sizeof(float));
+        size_t nEval = getEvalSize();
+        float *logits = malloc(nEval * g_NC * sizeof(float));
+        float *preds = malloc(nEval * sizeof(float));
         size_t correct = 0;
-        for (size_t i = 0; i < nTest; i++) {
-            sample_t *s = getTestSample(i);
+        size_t correctTest = 0;
+        for (size_t i = 0; i < nEval; i++) {
+            sample_t *s = getEvalSample(i);
             tensor_t *out = inference(model, modelSize, s->item);
             const float *p = (const float *)out->data;
             size_t am = 0;
@@ -773,16 +786,21 @@ int main(void) {
             }
             if (am == truth) {
                 correct++;
+                if (i >= g_nCalib) {
+                    correctTest++;
+                }
             }
             freeTensor(out);
             freeSample(s);
         }
-        if (writeNpyFloat_2(dumpDir, "logits", logits, nTest, g_NC) != 0 ||
-            writeNpyFloat_1(dumpDir, "preds", preds, nTest) != 0) {
+        if (writeNpyFloat_2(dumpDir, "logits", logits, nEval, g_NC) != 0 ||
+            writeNpyFloat_1(dumpDir, "preds", preds, nEval) != 0) {
             return 1;
         }
-        printf("RESULT accuracy=%.6f best_epoch=0 n_params=%zu wall_clock_s=%.3f\n",
-               (double)correct / (double)getTestSize(), nParams, mono_s() - t0);
+        printf("RESULT accuracy=%.6f test_acc=%.6f best_val_acc=0 best_epoch=0 n_params=%zu "
+               "wall_clock_s=%.3f\n",
+               (double)correct / (double)getEvalSize(),
+               (double)correctTest / (double)getTestOnlySize(), nParams, mono_s() - t0);
         return 0;
     }
 
@@ -840,8 +858,9 @@ int main(void) {
                 }
             }
         }
-        printf("RESULT accuracy=0 best_epoch=0 n_params=%zu wall_clock_s=%.3f\n", nParams,
-               mono_s() - t0);
+        printf("RESULT accuracy=0 test_acc=0 best_val_acc=0 best_epoch=0 n_params=%zu "
+               "wall_clock_s=%.3f\n",
+               nParams, mono_s() - t0);
         return 0;
     }
 
@@ -850,7 +869,8 @@ int main(void) {
     trainCtx_t ctx = {.model = model,
                       .modelSize = modelSize,
                       .sgd = sgd,
-                      .testLoader = testLoader,
+                      .evalLoader = evalLoader,
+                      .testOnlyLoader = testOnlyLoader,
                       .lossCfg = lossCfg,
                       .nEpochs = nEpochs,
                       .batchSize = batchSize,
@@ -858,6 +878,8 @@ int main(void) {
                       .lr0 = lr0,
                       .cosine = cosine,
                       .ckptDir = ckptDir,
+                      .finalAcc = -1.0f,
+                      .testAcc = -1.0f,
                       .bestAcc = -1.0f,
                       .bestEpoch = 0};
     /* Upstream MemProfile.h (ODT main 3e768c7) replaces the old in-header
@@ -895,14 +917,16 @@ int main(void) {
     size_t heapPeak = memProfilePeakBytes();
     long reconGap = (long)heapPeak - (long)mb.mcuTotal;
 
-    printf("RESULT accuracy=%.6f best_epoch=%d n_params=%zu wall_clock_s=%.3f "
+    printf("RESULT accuracy=%.6f test_acc=%.6f best_val_acc=%.6f best_epoch=%d n_params=%zu "
+           "wall_clock_s=%.3f "
            "mem_params_b=%zu mem_grads_b=%zu mem_optstate_b=%zu mem_act_b=%zu "
            "mem_gradbuf_b=%zu mem_io_b=%zu mem_masks_b=%zu mem_mcu_total_b=%zu "
            "mem_dataset_host_b=%zu rss_peak_kb=%ld rss_after_data_kb=%ld "
            "rss_after_model_kb=%ld cpu_user_s=%.3f cpu_sys_s=%.3f stack_peak_b=%ld "
            "mem_heap_peak_b=%zu mem_dataset_heap_b=%zu mem_model_heap_b=%zu "
            "mem_reconciliation_gap_b=%ld\n",
-           (double)ctx.bestAcc, ctx.bestEpoch, nParams, mono_s() - t0, mb.params, mb.grads,
+           (double)ctx.finalAcc, (double)ctx.testAcc, (double)ctx.bestAcc, ctx.bestEpoch, nParams,
+           mono_s() - t0, mb.params, mb.grads,
            mb.optstate, mb.act, mb.gradbuf, mb.io, mb.masks, mb.mcuTotal, mb.datasetHost,
            maxRssKb, rssAfterData, rssAfterModel, cpuU, cpuS, stackPeak, heapPeak, heapDataset,
            heapAfterOpt - heapBeforeModel, reconGap);
