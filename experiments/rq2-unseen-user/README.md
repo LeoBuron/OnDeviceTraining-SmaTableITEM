@@ -14,6 +14,7 @@
 - **FWT (forward transfer)**, GEM's definition: target-user accuracy at K=0 (zero-shot, right after pretraining on the original users, before any fine-tuning) minus a random-init reference baseline. This is the natural home for FWT — it's exactly the K=0 anchor point of this sweep, unlike RQ1 where it would be a fold-constant, sweep-invariant number (see that RQ's README for why it was deferred here).
 
 **Design notes.**
+- Splits (decision D5, 2026-09-09): the K fine-tuning samples are the first K windows of the held-out user's `calib` split (session 1, event-major order, K ≤ 60); accuracy is scored on that user's `test` split (sessions 2–10, 540 windows); retention on the other users' `retain` split (session 10). Stage-1's `test_acc` on the same checkpoint is the K = 0 point.
 - Baselines from `docs/paper-plan.md` map onto this sweep: B1 = pretrained, no fine-tune (the K=0 point); B2 = naïve full-model fine-tune without replay; B3 = last-layer-only; B4 = full-model with replay (primary).
 - Stage-1 checkpoints support full-network fine-tuning (all backward passes exist), so head-only vs. full-model is a runtime knob, not a checkpoint property.
 

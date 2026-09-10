@@ -46,7 +46,7 @@ uv run hpc/run_optuna.py \
 
 ## Stage-1 datasets
 
-The four stage-1 trial datasets are prepared from preprocessed gesture-windows stored under `data/model_and_dataset/trial-{2353,3408,3650,4223}/dataset/`. Each run generates 8999 canonical samples (4-channel, variable-length windows) with 15-fold LOSO and AOS fold splits:
+The four stage-1 trial datasets are prepared from preprocessed gesture-windows stored under `data/model_and_dataset/trial-{2353,3408,3650,4223}/dataset/`. Each run generates 8999 canonical samples (4-channel, variable-length windows) with 15-fold session-wise LOSO (four index sets per fold, see below) and AOS fold splits:
 
 ```bash
 uv run tools/prep_smatable.py --src data/model_and_dataset/trial-2353/dataset --dst data/smatable-trial-2353 --schemes LOSO,AOS --no-baked
@@ -62,7 +62,7 @@ uv run tools/prep_smatable.py --src data/model_and_dataset/trial-4223/dataset --
 | 3650 | 250 | 8999 | 6 |
 | 4223 | 625 | 8999 | 6 |
 
-All outputs land in gitignored `data/smatable-trial-<id>/` directories with bytewise-canonical `smatable_x.npy [8999,4,T]` and `smatable_y.npy` plus fold indices for LOSO (15 subjects, ~8399 train / ~600 test per fold) and AOS (15 sessions, ~8459 train / ~540 test per fold). The `--no-baked` flag ensures no MCU header files are generated (stage 2 integrates baked backends for RP2350 runs).
+All outputs land in gitignored `data/smatable-trial-<id>/` directories with bytewise-canonical `smatable_x.npy [8999,4,T]` and `smatable_y.npy` plus fold indices for LOSO (15 subjects; session-wise since 2026-09-10: `train` = other subjects × sessions 1–9 = 7559, `retain` = other subjects × session 10 = 840, `calib` = held-out subject × session 1 = 60 in event-major order, `test` = held-out subject × sessions 2–10 = 540; verify with `uv run tests/prep_splits_check.py --dst data/smatable-trial-3650`) and AOS (15 sessions, ~8459 train / ~540 test per fold). The `--no-baked` flag ensures no MCU header files are generated (stage 2 integrates baked backends for RP2350 runs).
 
 ### Trial-3408: reduced grid + optional extension
 
@@ -78,7 +78,16 @@ The aggregator refuses to merge studies whose search-space *key sets* differ (va
 
 ### RESULT keys
 
-`stage1_pretrain`'s RESULT line carries 23 keys total: the 19 base keys (accuracy/params/wall-clock, the 7-term static `mem_*_b` budget — params+grads+optstate+act+gradbuf+io+masks — plus RSS/CPU milestones and `stack_peak_b`, measured via upstream `measurePeakStackBytes`), and 4 heap-counter keys (`mem_heap_peak_b`, `mem_dataset_heap_b`, `mem_model_heap_b`, `mem_reconciliation_gap_b`) gated by the `ODT_MEM_PROFILE` CMake flag — all four print 0 on a binary built without it. `hpc/build_all_rqs.sh` now passes `-DODT_MEM_PROFILE=ON` by default. `mem_mcu_total_b` (static budget) plus `stack_peak_b` (measured) against the RP2350's 520 KB SRAM is the on-device feasibility figure.
+`stage1_pretrain`'s RESULT line carries 25 keys total: `accuracy` (final-epoch accuracy on calib+test — the Optuna objective), `test_acc` (final epoch, test rows only), `best_val_acc` + `best_epoch` (diagnostics; `tools/aggregate_stage1.py` tabulates best − final as the selection-bias column), `n_params`, `wall_clock_s`, the base memory keys (the 7-term static `mem_*_b` budget — params+grads+optstate+act+gradbuf+io+masks — plus RSS/CPU milestones and `stack_peak_b`, measured via upstream `measurePeakStackBytes`), and 4 heap-counter keys (`mem_heap_peak_b`, `mem_dataset_heap_b`, `mem_model_heap_b`, `mem_reconciliation_gap_b`) gated by the `ODT_MEM_PROFILE` CMake flag — all four print 0 on a binary built without it. `hpc/build_all_rqs.sh` now passes `-DODT_MEM_PROFILE=ON` by default. `mem_mcu_total_b` (static budget) plus `stack_peak_b` (measured) against the RP2350's 520 KB SRAM is the on-device feasibility figure.
+
+### R0 — Adam reference for the V3 gate
+
+The V3 gate ("15-fold mean within 3 pp of the Adam reference", final epoch on both sides since decision D1) reads `runs/r0/reference.csv`, produced by `tools/stage1_r0.py` from each trial's `config.json` (Adam, cosine annealing, weight decay 0, dropout per config) on the same session-wise split. Resumable (rows already present are skipped); runs on the Mac while the sweeps run:
+
+```bash
+uv run tools/stage1_r0.py --configs trial-2353,trial-3408,trial-3650,trial-4223 --folds 0-14 --out runs/r0/reference.csv
+uv run tools/aggregate_stage1.py --run-dir runs/optuna-amplitude/smatable_optuna_123456 --config-name trial-3650 --reference runs/r0/reference.csv --out runs/stage1_selection_3650.json
+```
 
 ### RQ1: replay-buffer sweep
 

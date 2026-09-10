@@ -24,14 +24,14 @@
 
 ## Current state
 
-*Updated 2026-09-03. Last code change 2026-07-21 (`15cca8a`). Execution history of the stage-1 work is in the local, gitignored ledger `.superpowers/sdd/progress.md`.*
+*Updated 2026-09-10. Last code change 2026-09-10 (protocol re-baseline for decisions D1/D5). Execution history of the stage-1 work is in the local, gitignored ledger `.superpowers/sdd/progress.md`.*
 
 ### Workstreams
 
 | Workstream | State | Blocked on |
 |---|---|---|
 | Optuna + Slurm + Apptainer harness (`hpc/`) | Done. SQLite-WAL storage on node-local tmpfs; verified on Amplitude in April on the synthetic toy set | — |
-| Stage 1: DepthwiseCNN LOSO pretrain in ODT (`src/examples/stage1_pretrain.c`) | Code done. GroupNorm(1,C) is upstream; gates V0–V4 green on all four trial architectures; local 15-fold pilot on trial-3650 passes V3 (mean 0.7205 vs. Adam reference 0.7045) | Amplitude sweeps (4 grids) never started: 15 commits on `paper0` unpushed, cluster last synced 2026-04-27, trial datasets never uploaded |
+| Stage 1: DepthwiseCNN LOSO pretrain in ODT (`src/examples/stage1_pretrain.c`) | Code done and re-baselined 2026-09-10 for the design-review decisions. **D5** session-wise LOSO: per fold `train` = 14 users × sessions 1–9 (7559), `retain` = their session 10 (840), `calib` = new user's session 1 in event-major order (60), `test` = new user's sessions 2–10 (540); headline = final-epoch accuracy on calib+test, `test_acc` on test only. **D1** final-epoch checkpoint; best epoch logged as the selection-bias diagnostic. Gates V0, V1/V2, V4 green on the new split. The July 15-fold pilot (V3 pass, 0.7205 vs. 0.7045) predates the change; the Adam reference is recomputed by `tools/stage1_r0.py` | Amplitude sweeps (4 grids) never started: `paper0` unpushed, cluster last synced 2026-04-27, re-prepped trial datasets never uploaded — `docs/runbook-stage1-amplitude.md` |
 | RP2350 memory feasibility | Done, paper-ready. trial-3650 = 109 KiB, trial-2353 = 242 KiB, trial-4223 = 303 KiB fit in 520 KB SRAM; trial-3408 = 1953 KiB does not (`executeOp` VLA stack scales with width × T) | — |
 | RQ1 replay buffer (`src/examples/rq1_replay_buffer.c`) | Implemented: four arms (`ppca` / `exemplar_random` / `exemplar_herding` / `none`) at iso-byte budgets, three search spaces (900 + 105 + 90 trials). Runs on a **placeholder MLP**; never swept | Stage-1 checkpoints → port to the DepthwiseCNN via `modelLoadStateDict` |
 | RQ2 unseen user (= "stage 2") | Stub | Implementation; stage-1 checkpoints; RQ1's chosen replay budget |
@@ -46,7 +46,7 @@
 Each step needs the artifact of the previous one.
 
 1. Push `paper0` (non-fast-forward: origin's tip `f8582263` was rewritten locally; jj knows), re-upload repo + the four trial datasets, re-allocate the Lustre workspace. The container needs no rebuild (`uv.lock` unchanged since 2026-04-28).
-2. Stage-1 sweeps on Amplitude: `stage1_trial{2353,3650,4223}.json` (150 trials each), `stage1_trial3408.json` (75 trials, `TRIAL_TIMEOUT_S=72000`; optional `_ext_wd` complement +75). Aggregate with `tools/aggregate_stage1.py`, pick per-architecture winners.
+2. Stage-1 sweeps on Amplitude: `stage1_trial{2353,3650,4223}.json` (150 trials each), `stage1_trial3408.json` (75 trials, `TRIAL_TIMEOUT_S=72000`; optional `_ext_wd` complement +75). Aggregate with `tools/aggregate_stage1.py`, pick per-architecture winners. The V3 gate compares final-epoch means against R0, the Adam reference recomputed on the same split (`tools/stage1_r0.py`; runs on the Mac in parallel with the sweeps; `--reference runs/r0/reference.csv`).
 3. RQ1: replace the placeholder MLP with the DepthwiseCNN reloaded from a stage-1 checkpoint; sweep the main grid plus the two PPCA side studies.
 4. RQ2: implement the K-sample fine-tune on the held-out user (FWT at K = 0). RQ4: second seed + grid. RQ3 / RQ5 per cut order.
 5. RP2350: fix F9 (MCU configure blocker), build with `PICO2_W` + baked fold headers, flash, run inference, run one training step, L3 comparator vs. HOST, then the top configs on device. Critical path: it cannot be parallelised on the cluster and it carries the headline claim.
@@ -66,6 +66,7 @@ Still the agreed ladder. Cut in this order:
 ### Open blockers
 
 - [ ] **Venue + deadline** — sets the cut level and whether the COI process below applies.
+- [ ] **Protocol assumptions to confirm with Florian (2026-09-10)** — (a) calib order: the windows carry no timestamps and event ids are per-gesture repetition counters, so "chronological" is implemented as event-major order (event 1 of every gesture, then event 2, …), which also keeps every K-prefix class-balanced; (b) Adam reference settings: lr 1e-3, batch 128, 250 epochs, cosine annealing, weight decay 0, no augmentation, dropout per trial config; (c) the stage-1 headline is scored on all 10 sessions of the new user (calib+test), `test_acc` on sessions 2–10 only.
 - [ ] **F9 MCU-build blocker** — upstream `MemProfile` pthread dependency breaks every cross-compile at pin `7d7f1d5`. Decision 2026-09-05: fix upstream on `develop`, then re-pin. The HOST sweeps do not need it, so stage 1 runs at `7d7f1d5` meanwhile.
 - [ ] **RP2350 bring-up** — no on-device run exists; the one-sentence claim depends on it.
 - [ ] **Dataset availability statement** — usage of Florian's dataset for this paper is cleared (2026-09-05). Still needed for the paper: how it is cited (DOI / Hettstedt 2026 / institutional contact) and whether the preprocessed windows can be published or are "available on request".

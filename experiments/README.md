@@ -14,7 +14,7 @@ Convention per RQ (set by RQ1): the binary is `src/examples/<rq>.c`, the Optuna 
 
 Stubs print `RESULT skipped reason="not implemented yet (...)"`; `hpc/run_optuna.py` prunes such trials, so the driver can still iterate them for plumbing tests.
 
-Prerequisite for every RQ: stage-1 LOSO checkpoints from `src/examples/stage1_pretrain.c` (npy state dict + `manifest.json` + `memory.json` per trial, reloaded via `modelLoadStateDict`). Stage 1 is verified locally (gates V0–V4, 15-fold pilot on trial-3650) but the Amplitude sweeps have not run yet — see "Current state" in `docs/paper-plan.md`.
+Prerequisite for every RQ: stage-1 checkpoints from `src/examples/stage1_pretrain.c` (final-epoch npy state dict + `manifest.json` + `memory.json` per trial, reloaded via `modelLoadStateDict`), trained on the session-wise LOSO split (per fold: `train` = other users × sessions 1–9, `retain` = other users × session 10, `calib` = held-out user × session 1, `test` = held-out user × sessions 2–10; `tools/prep_smatable.py`). Stage 1 is verified locally on that split (gates V0, V1/V2, V4) but the Amplitude sweeps have not run yet — see "Current state" in `docs/paper-plan.md`.
 
 Cross-cutting reminders:
 
