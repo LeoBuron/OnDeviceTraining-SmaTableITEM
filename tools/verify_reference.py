@@ -23,7 +23,7 @@ TRIALS = ["trial-2353", "trial-3408", "trial-3650", "trial-4223"]
 
 
 class Block(nn.Module):
-    def __init__(self, cin, cout, k, dilation):
+    def __init__(self, cin, cout, k, dilation, p_drop=0.0):
         super().__init__()
         self.depthwise = nn.Conv1d(cin, cin, k, padding="same", dilation=dilation,
                                    groups=cin, bias=False)
@@ -31,24 +31,28 @@ class Block(nn.Module):
         self.norm = nn.GroupNorm(1, cout)
         self.act = nn.ReLU()
         self.pool = nn.MaxPool1d(2)
+        self.drop = nn.Dropout(p_drop) if p_drop > 0 else nn.Identity()
 
     def forward(self, x):
-        return self.pool(self.act(self.norm(self.pointwise(self.depthwise(x)))))
+        return self.drop(self.pool(self.act(self.norm(self.pointwise(self.depthwise(x))))))
 
 
 class DepthwiseCNN(nn.Module):
-    """Eval-shape model (dropout omitted: identity in eval; stage1_reference.py
-    adds Dropout for training parity)."""
+    """Reference model. Dropout (after each block's pool and before the last
+    Linear) is Identity when p_drop == 0 and inactive in eval mode, so V0
+    (eval-only reproduction of Florian's confusion matrices) is unaffected;
+    stage1_reference.py --train passes the trial's p_drop for R0."""
 
-    def __init__(self, widths, k, dilation, in_ch=4, n_cls=6):
+    def __init__(self, widths, k, dilation, in_ch=4, n_cls=6, p_drop=0.0):
         super().__init__()
         blocks, prev = [], in_ch
         for w in widths:
-            blocks.append(Block(prev, w, k, dilation))
+            blocks.append(Block(prev, w, k, dilation, p_drop))
             prev = w
         self.features = nn.Sequential(*blocks)
         self.head = nn.Sequential(nn.AdaptiveAvgPool1d(1), nn.Flatten(),
-                                  nn.Linear(prev, 16), nn.ReLU(), nn.Identity(),
+                                  nn.Linear(prev, 16), nn.ReLU(),
+                                  nn.Dropout(p_drop) if p_drop > 0 else nn.Identity(),
                                   nn.Linear(16, n_cls))
 
     def forward(self, x):
