@@ -1,14 +1,28 @@
 """Aggregate a stage-1 Optuna run: mean/std LOSO accuracy per hyperparameter
 combo (over folds), compare against the Adam reference, select the winner.
 
+Decision D1: a trial's `value` is the FINAL-epoch accuracy (not best-epoch);
+the winning combo is selected by mean final-epoch accuracy, and V3 compares
+that mean against the reference's final_val_acc. Each combo also reports
+mean_best_acc (mean of the trainer's best_val_acc user attr, when present)
+and selection_bias_pp = 100*(mean_best_acc - mean_acc) — the optimistic bias
+that best-epoch selection would have introduced.
+
 Usage: uv run tools/aggregate_stage1.py --run-dir runs/optuna-local/stage1_smoke--<ts> \
-           --config-name trial-3650 --expect-folds 2 --out stage1_selection.json
+           --config-name trial-3650 --expect-folds 2 --reference runs/r0/reference.csv \
+           --out stage1_selection.json
 
 --run-dir accepts multiple directories: a base study plus extension studies
 over complementary sub-grids (e.g. stage1_trial3408 wd=0.0 + the
 stage1_trial3408_ext_wd wd=0.0001 complement) merge into one selection.
 All studies must share the same search-space KEY SET (values may differ);
 `run_dir` in the output JSON is always a list.
+
+--reference points at the Adam reference CSV written by tools/stage1_r0.py
+(columns config_name,fold_idx,optim,lr,weight_decay,epochs,seed,final_val_acc,
+best_val_acc,best_epoch,final_test_acc,n_train,n_eval); rows are filtered by
+--config-name and averaged over fold_idx for both final_val_acc and
+best_val_acc.
 """
 import argparse
 import csv
@@ -18,7 +32,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-REFERENCE = Path("data/model_and_dataset/summary.csv")
+DEFAULT_REFERENCE = Path("runs/r0/reference.csv")
 FOLD_KEY = "fold"
 
 
@@ -68,6 +82,8 @@ def main() -> int:
     p.add_argument("--search-space", type=Path, default=None,
                    help="search-space JSON used for this run (defines the combo key). "
                         "Defaults to <run-dir>/search_space.json.")
+    p.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE,
+                   help="R0 CSV from tools/stage1_r0.py (final_val_acc/best_val_acc per config, fold)")
     p.add_argument("--out", type=Path, default=Path("stage1_selection.json"))
     args = p.parse_args()
 
@@ -90,9 +106,16 @@ def main() -> int:
         key = tuple((k, r[k]) for k in sorted(space_keys))
         combos[key].append(r)
 
-    ref_accs = [float(r["best_val_acc"]) for r in csv.DictReader(REFERENCE.open())
-                if r["config_name"] == args.config_name]
-    ref_mean = st.mean(ref_accs) if ref_accs else float("nan")
+    ref_final, ref_best = [], []
+    if args.reference.exists():
+        for r in csv.DictReader(args.reference.open()):
+            if r["config_name"] == args.config_name:
+                ref_final.append(float(r["final_val_acc"]))
+                ref_best.append(float(r["best_val_acc"]))
+    else:
+        print(f"reference file {args.reference} not found — run tools/stage1_r0.py", file=sys.stderr)
+    ref_final_mean = st.mean(ref_final) if ref_final else float("nan")
+    ref_best_mean = st.mean(ref_best) if ref_best else float("nan")
 
     report = []
     for key, rs in sorted(combos.items()):
@@ -111,12 +134,17 @@ def main() -> int:
         deduped = list(by_fold.values())
 
         accs = [float(r["value"]) for r in deduped]
+        best_accs = [float(r["best_val_acc"]) for r in deduped if r.get("best_val_acc") not in (None, "")]
+        mean_final = st.mean(accs)
+        mean_best = st.mean(best_accs) if len(best_accs) == len(accs) else float("nan")
         complete = len(deduped) == args.expect_folds
         entry = {
             "params": dict(key),
             "n_folds": len(deduped),
             "complete": complete,
-            "mean_acc": st.mean(accs),
+            "mean_acc": mean_final,
+            "mean_best_acc": mean_best,
+            "selection_bias_pp": 100.0 * (mean_best - mean_final),
             "std_acc": st.stdev(accs) if len(accs) > 1 else 0.0,
             "min_acc": min(accs),
             "folds": sorted(
@@ -127,22 +155,26 @@ def main() -> int:
         report.append(entry)
         flag = "" if complete else "  [INCOMPLETE]"
         print(f"{dict(key)}: mean={entry['mean_acc']:.4f} +/- {entry['std_acc']:.4f} "
-              f"min={entry['min_acc']:.4f} ({len(deduped)} folds){flag}")
+              f"min={entry['min_acc']:.4f} best={entry['mean_best_acc']:.4f} "
+              f"bias={entry['selection_bias_pp']:+.1f}pp ({len(deduped)} folds){flag}")
 
     complete_combos = [e for e in report if e["complete"]]
     if not complete_combos:
         print("no complete combos — nothing to select", file=sys.stderr)
         return 1
     best = max(complete_combos, key=lambda e: e["mean_acc"])
-    gap = best["mean_acc"] - ref_mean
-    print(f"\nreference ({args.config_name}, Adam): mean={ref_mean:.4f}")
-    print(f"best SGD combo: mean={best['mean_acc']:.4f} (gap {gap:+.4f}) "
+    gap = best["mean_acc"] - ref_final_mean
+    print(f"\nreference ({args.config_name}, Adam, final epoch): mean={ref_final_mean:.4f} "
+          f"(best-epoch mean {ref_best_mean:.4f})")
+    print(f"best SGD combo (final epoch): mean={best['mean_acc']:.4f} (gap {gap:+.4f}) "
+          f"best-epoch mean={best['mean_best_acc']:.4f} bias={best['selection_bias_pp']:+.1f}pp "
           f"params={best['params']}")
-    print(f"V3 ({'PASS' if gap >= -0.03 else 'FAIL'}): within 3pp of reference"
-          if ref_accs else "V3: no reference rows found")
+    print(f"V3 ({'PASS' if gap >= -0.03 else 'FAIL'}): within 3pp of the final-epoch reference"
+          if ref_final else "V3: no reference rows found")
 
     args.out.write_text(json.dumps(
-        {"config_name": args.config_name, "reference_mean": ref_mean,
+        {"config_name": args.config_name, "reference_csv": str(args.reference),
+         "reference_final_mean": ref_final_mean, "reference_best_mean": ref_best_mean,
          "run_dir": [str(d) for d in args.run_dir], "best": best,
          "all_combos": report}, indent=2))
     print(f"selection -> {args.out}")
